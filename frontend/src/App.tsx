@@ -128,6 +128,12 @@ function formatTimestamp(value: string | null | undefined) {
   return new Date(value).toLocaleString()
 }
 
+function sortTradesAscending(items: Trade[]) {
+  return [...items].sort(
+    (left, right) => new Date(left.trade_time).getTime() - new Date(right.trade_time).getTime(),
+  )
+}
+
 function statusTone(value: string | null | undefined) {
   const normalized = (value ?? '').toLowerCase()
 
@@ -606,6 +612,34 @@ function App() {
     manualOrder.instrumentType === 'perpetual'
       ? estimatedNotional / Math.max(Number(manualOrder.leverage) || 1, 1)
       : estimatedNotional
+  const chronologicalTrades = sortTradesAscending(trades)
+  const recentExitTrades = chronologicalTrades.filter((trade) => trade.action === 'exit').slice(-18)
+  const recentTradeTimeline = chronologicalTrades.slice(-8).reverse()
+  const recentRealizedTrail =
+    portfolio && recentExitTrades.length
+      ? (() => {
+          const endingEquity = portfolio.starting_balance + portfolio.realized_pnl
+          const baselineEquity =
+            endingEquity - recentExitTrades.reduce((sum, trade) => sum + trade.realized_pnl, 0)
+          let runningEquity = baselineEquity
+          return recentExitTrades.map((trade) => {
+            runningEquity += trade.realized_pnl
+            return {
+              trade,
+              equity: runningEquity,
+              pnl: trade.realized_pnl,
+            }
+          })
+        })()
+      : []
+  const recentTrailEquities = recentRealizedTrail.map((point) => point.equity)
+  const recentTrailMin = recentTrailEquities.length ? Math.min(...recentTrailEquities) : 0
+  const recentTrailMax = recentTrailEquities.length ? Math.max(...recentTrailEquities) : 0
+  const recentExitWinRate =
+    recentExitTrades.length > 0
+      ? recentExitTrades.filter((trade) => trade.realized_pnl > 0).length / recentExitTrades.length
+      : 0
+  const recentExitFees = recentExitTrades.reduce((sum, trade) => sum + trade.fee_paid, 0)
 
   function setManualInstrumentType(value: string) {
     setManualOrder((current) => ({
@@ -908,6 +942,69 @@ function App() {
                       </div>
                     ))}
                   </div>
+                </Panel>
+
+                <Panel title="Recent Trade Timeline" eyebrow="Recent realized path and fills">
+                  {recentRealizedTrail.length ? (
+                    <div className="risk-overview">
+                      <div className="mini-stat-grid">
+                        <div className="mini-stat">
+                          <span>Recent exits</span>
+                          <strong>{recentExitTrades.length}</strong>
+                        </div>
+                        <div className="mini-stat">
+                          <span>Recent win rate</span>
+                          <strong>{formatPercent(recentExitWinRate)}</strong>
+                        </div>
+                        <div className="mini-stat">
+                          <span>Recent exit fees</span>
+                          <strong>{formatCurrency(recentExitFees)}</strong>
+                        </div>
+                        <div className="mini-stat">
+                          <span>Current realized</span>
+                          <strong>{formatSignedCurrency(portfolio?.realized_pnl)}</strong>
+                        </div>
+                      </div>
+
+                      <div className="equity-strip trade-equity-strip">
+                        {recentRealizedTrail.map((point, index) => {
+                          const height =
+                            recentTrailMax === recentTrailMin
+                              ? 100
+                              : ((point.equity - recentTrailMin) /
+                                  Math.max(recentTrailMax - recentTrailMin, 1)) *
+                                100
+                          return (
+                            <div key={`${point.trade.id}-${index}`} className="equity-bar-shell">
+                              <div
+                                className={`equity-bar ${point.pnl >= 0 ? 'is-positive' : 'is-critical'}`}
+                                style={{ height: `${Math.max(8, height)}%` }}
+                                title={`${point.trade.symbol} ${point.trade.strategy_name ?? point.trade.source} ${formatSignedCurrency(point.pnl)}`}
+                              />
+                            </div>
+                          )
+                        })}
+                      </div>
+
+                      <div className="event-console">
+                        {recentTradeTimeline.map((trade) => (
+                          <div key={`timeline-${trade.id}`} className="event-line">
+                            <span className={`event-type ${trade.realized_pnl >= 0 ? 'tone-positive' : 'tone-critical'}`}>
+                              [{trade.action}]
+                            </span>
+                            <div className="event-message">
+                              {(trade.strategy_name ?? trade.source).toUpperCase()} {trade.symbol} {trade.position_side}{' '}
+                              {trade.quantity.toFixed(4)} @ {formatPrice(trade.price)} · pnl{' '}
+                              {formatSignedCurrency(trade.realized_pnl)}
+                            </div>
+                            <time>{formatTime(trade.trade_time)}</time>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <EmptyState message="No closed trades yet. Once exits occur, this panel will show the recent realized path and fill sequence." />
+                  )}
                 </Panel>
 
                 <Panel title="Event Log" eyebrow="Audit trail">

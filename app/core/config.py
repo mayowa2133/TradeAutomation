@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     default_fee_bps: float = 10.0
     default_slippage_bps: float = 5.0
     stop_loss_cooldown_minutes: int = 30
+    strategy_exit_cooldown_minutes: int = 1
     default_leverage: float = 2.0
     max_leverage: float = 5.0
     max_gross_exposure_pct: float = 2.0
@@ -78,6 +79,7 @@ class Settings(BaseSettings):
     bybit_ws_public_url: str = "wss://stream.bybit.com/v5/public/linear"
     precision_cache_ttl_seconds: int = 3600
     default_execution_model: str = "candle"
+    evaluate_on_bar_close_only: bool = True
 
     llm_features_enabled: bool = False
     llm_provider: str = "openai"

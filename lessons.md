@@ -17,6 +17,14 @@
 - Exchange behavior differs across symbols, lot sizes, tick sizes, leverage limits, order status semantics, and balance reporting. The adapter boundary exists to isolate that variance.
 - Funding is easy to ignore and expensive to forget. Perpetual accounting that omits funding costs or credits will drift away from reality.
 - Liquidation distance is not just another metric for the dashboard. It is a hard constraint that must be checked before entry sizing is accepted.
+- If you evaluate 1m strategies every 15 seconds, you must dedupe actions by candle. Otherwise crossover and breakout systems can enter and then immediately exit on the same bar simply because the worker re-reads the same signal state.
+- For bar-based strategies, “evaluate frequently” and “act frequently” are not the same thing. A 15-second scheduler can still be useful for monitoring, but entries and exits should key off completed bars unless the strategy is explicitly intrabar-aware.
+- Exit cooldowns belong at the execution-orchestration layer, not inside each strategy. That keeps strategies pure and makes the anti-churn rule consistent across implementations.
+- Faster demo profiles are useful for showing the dashboard, but they should live behind explicit config or scripts. Demo tuning is for observability, not evidence of better trading performance.
+- If removing fees and slippage turns a strategy from mildly positive into clearly negative, the core issue is turnover and cost structure, not the absence of an AI decision layer.
+- A recent-sample parameter set that looks better is only a research lead. Treat it as a hypothesis that still needs out-of-sample validation, not as proof of edge.
+- A scheduler “refresh” job is not a real refresh if it returns cached DB rows once `limit` bars already exist. For live paper-trading loops, refresh paths need an explicit forced fetch mode or they silently freeze market state.
+- When a hard guard like max daily loss fires inside a scheduler loop, treat it as a first-class operating state rather than an exception flood. The order should remain rejected, but the scheduler should keep running cleanly.
 
 ## Agent Misuse Risks
 
@@ -33,7 +41,11 @@
 - validated the FastAPI lifespan path, not just module import, after startup became responsible for more initialization work
 - aligned docker-compose, Alembic, workers, and frontend packaging after the repo became multi-service
 - added regression tests for new risk, optimizer, news, perpetual, and dashboard behavior instead of relying on the original MVP-only suite
+- fixed timeframe identity and same-candle reprocessing issues that were causing paper-trading churn during rapid scheduler loops
+- moved 1-minute strategy evaluation onto completed bars, added strategy-level post-exit cooldowns, and staggered market refresh jobs so the worker loop behaves more like a trading system and less like a polling storm
 - updated README, HANDOFF, and frontend docs so operators are not following spot-only instructions against a derivatives-capable codebase
+- separated dashboard demo tuning from lower-turnover research tuning so product demos stop contaminating strategy evaluation
+- added lightweight paper-trade loss analysis and an Overview trade timeline because loss diagnosis needs to be visible from the product surface, not only from ad hoc SQL
 
 ## What We Would Do Differently In V2
 

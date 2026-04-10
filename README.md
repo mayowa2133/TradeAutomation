@@ -47,6 +47,8 @@ uv run alembic upgrade head
 uv run uvicorn app.main:app --reload
 ```
 
+The checked-in `.env.example` is host-friendly for local backend work and uses SQLite by default. Docker Compose overrides database and Redis URLs inside containers.
+
 ### Local workers
 
 Scheduler worker:
@@ -232,6 +234,36 @@ frontend/
   Dockerfile    production-style static frontend container
 tests/          backend regression coverage
 ```
+
+## Demo Profiles And Trade Review
+
+Dashboard demo profile:
+
+```bash
+uv run python scripts/tune_demo_mode.py --profile active-demo
+```
+
+Available profiles:
+
+```bash
+uv run python scripts/tune_demo_mode.py --list-profiles
+```
+
+Lower-turnover research preset:
+
+```bash
+uv run python scripts/tune_demo_mode.py --profile research-breakout-15m
+```
+
+The `research-breakout-15m` preset is based on recent paper-trade loss review. It is a research hypothesis only, not a profitability claim.
+
+Paper-trade diagnosis:
+
+```bash
+uv run python scripts/analyze_paper_trades.py
+```
+
+This script summarizes paper-mode exits, fees, hold times, and strategy-level outcomes so you can see whether losses are being driven by cost, churn, or weak signal quality.
 
 ## Testing and Verification
 

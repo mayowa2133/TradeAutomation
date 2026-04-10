@@ -78,6 +78,27 @@ class PortfolioService:
             .one_or_none()
         )
 
+    def get_latest_closed_position(
+        self,
+        *,
+        strategy_name: str,
+        symbol: str,
+        instrument_type: InstrumentType,
+    ) -> Position | None:
+        return (
+            self.db.query(Position)
+            .filter(
+                Position.mode == self.settings.trading_mode,
+                Position.strategy_name == strategy_name,
+                Position.symbol == symbol,
+                Position.instrument_type == instrument_type,
+                Position.status == PositionStatus.CLOSED,
+                Position.closed_at.is_not(None),
+            )
+            .order_by(Position.closed_at.desc())
+            .first()
+        )
+
     def get_orders(self, limit: int = 100) -> list[Order]:
         return (
             self.db.query(Order)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.core.config import get_settings
 from app.core.enums import InstrumentType
+from app.core.exceptions import RiskCheckFailed
 from app.core.logging import get_logger
 from app.db.session import get_session_factory, init_db
 from app.services.data_service import DataService
@@ -24,6 +25,7 @@ def refresh_symbol_timeframe(symbol: str, timeframe: str, limit: int = 300) -> N
             timeframe=timeframe,
             limit=limit,
             instrument_type=instrument_type,
+            refresh=True,
         )
         logger.info(
             "Refreshed market data",
@@ -44,13 +46,28 @@ def evaluate_enabled_strategy(strategy_name: str, symbol: str, timeframe: str, l
         config = registry.get_db_config(db, strategy_name)
         if not config.enabled:
             return
-        result = ExecutionService(db=db, settings=settings, registry=registry).evaluate_strategy(
-            strategy_name=strategy_name,
-            symbol=symbol,
-            timeframe=timeframe,
-            limit=limit,
-            instrument_type=instrument_type,
-        )
+        try:
+            result = ExecutionService(db=db, settings=settings, registry=registry).evaluate_strategy(
+                strategy_name=strategy_name,
+                symbol=symbol,
+                timeframe=timeframe,
+                limit=limit,
+                instrument_type=instrument_type,
+            )
+        except RiskCheckFailed as exc:
+            logger.warning(
+                "Strategy evaluation blocked by risk controls",
+                extra={
+                    "event_type": "strategy_eval_blocked",
+                    "strategy_name": strategy_name,
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "instrument_type": instrument_type.value,
+                    "mode": settings.trading_mode.value,
+                    "reason": str(exc),
+                },
+            )
+            return
         logger.info(
             "Evaluated strategy",
             extra={

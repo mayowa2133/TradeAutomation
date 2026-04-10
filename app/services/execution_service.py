@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import pandas as pd
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
@@ -32,6 +33,7 @@ from app.services.market_depth_service import MarketDepthService
 from app.services.portfolio_service import PortfolioService
 from app.services.risk_service import RiskService
 from app.services.strategy_registry import StrategyRegistry
+from app.utils.timeframes import timeframe_to_minutes
 
 _paper_exchange_singleton: PaperExchange | None = None
 
@@ -151,6 +153,111 @@ class ExecutionService:
         self.db.add(order)
         self.db.flush()
         return order
+
+    def _latest_strategy_order(
+        self,
+        *,
+        strategy_name: str,
+        symbol: str,
+        instrument_type: InstrumentType,
+    ) -> Order | None:
+        return (
+            self.db.query(Order)
+            .filter(
+                Order.strategy_name == strategy_name,
+                Order.symbol == symbol,
+                Order.instrument_type == instrument_type,
+            )
+            .order_by(Order.created_at.desc())
+            .first()
+        )
+
+    def _bar_already_processed(
+        self,
+        *,
+        strategy_name: str,
+        symbol: str,
+        instrument_type: InstrumentType,
+        bar_timestamp: pd.Timestamp | datetime,
+    ) -> bool:
+        latest_order = self._latest_strategy_order(
+            strategy_name=strategy_name,
+            symbol=symbol,
+            instrument_type=instrument_type,
+        )
+        if latest_order is None:
+            return False
+        if isinstance(bar_timestamp, pd.Timestamp):
+            bar_datetime = bar_timestamp.to_pydatetime()
+        else:
+            bar_datetime = bar_timestamp
+        order_datetime = latest_order.created_at
+        if order_datetime.tzinfo is None:
+            order_datetime = order_datetime.replace(tzinfo=timezone.utc)
+        if bar_datetime.tzinfo is None:
+            bar_datetime = bar_datetime.replace(tzinfo=timezone.utc)
+        return order_datetime >= bar_datetime
+
+    def _normalize_timestamp(self, value: pd.Timestamp | datetime) -> datetime:
+        if isinstance(value, pd.Timestamp):
+            normalized = value.to_pydatetime()
+        else:
+            normalized = value
+        if normalized.tzinfo is None:
+            normalized = normalized.replace(tzinfo=timezone.utc)
+        return normalized
+
+    def _selected_signal_row(
+        self,
+        *,
+        signal_frame: pd.DataFrame,
+        timeframe: str,
+        now: datetime,
+    ) -> tuple[pd.Timestamp | datetime | None, pd.Series | None, str]:
+        latest_timestamp = signal_frame.index[-1]
+        latest_row = signal_frame.iloc[-1]
+        if not self.settings.evaluate_on_bar_close_only:
+            return latest_timestamp, latest_row, "latest_bar"
+
+        bar_minutes = timeframe_to_minutes(timeframe)
+        latest_close_at = self._normalize_timestamp(latest_timestamp) + timedelta(minutes=bar_minutes)
+        if latest_close_at <= now:
+            return latest_timestamp, latest_row, "latest_closed_bar"
+        if len(signal_frame) < 2:
+            return None, None, "awaiting_bar_close"
+
+        previous_timestamp = signal_frame.index[-2]
+        previous_row = signal_frame.iloc[-2]
+        previous_close_at = self._normalize_timestamp(previous_timestamp) + timedelta(minutes=bar_minutes)
+        if previous_close_at > now:
+            return None, None, "awaiting_bar_close"
+        return previous_timestamp, previous_row, "previous_closed_bar"
+
+    def _strategy_cooldown_until(
+        self,
+        *,
+        strategy_name: str,
+        symbol: str,
+        instrument_type: InstrumentType,
+        timeframe: str,
+        now: datetime,
+    ) -> datetime | None:
+        latest_closed_position = self.portfolio_service.get_latest_closed_position(
+            strategy_name=strategy_name,
+            symbol=symbol,
+            instrument_type=instrument_type,
+        )
+        if latest_closed_position is None or latest_closed_position.closed_at is None:
+            return None
+        if latest_closed_position.exit_reason == "manual_exit":
+            return None
+        cooldown_minutes = max(self.settings.strategy_exit_cooldown_minutes, timeframe_to_minutes(timeframe))
+        cooldown_until = self._normalize_timestamp(latest_closed_position.closed_at) + timedelta(
+            minutes=cooldown_minutes
+        )
+        if cooldown_until > now:
+            return cooldown_until
+        return None
 
     def _reject_order(
         self,
@@ -323,6 +430,7 @@ class ExecutionService:
         self,
         *,
         strategy_name: str | None,
+        strategy_instance_name: str | None = None,
         symbol: str,
         reference_price: float,
         order_type: OrderType = OrderType.MARKET,
@@ -346,15 +454,16 @@ class ExecutionService:
             if margin_mode is not None
             else (MarginMode.ISOLATED if instrument_type == InstrumentType.PERPETUAL else MarginMode.CASH)
         )
+        stored_strategy_name = strategy_instance_name or strategy_name or "manual"
         selected_leverage = 1.0 if instrument_type == InstrumentType.SPOT else float(leverage or self.settings.default_leverage)
         execution_model = execution_model or self.settings.default_execution_model
         existing_position = self.portfolio_service.get_position(
-            strategy_name=strategy_name or "manual",
+            strategy_name=stored_strategy_name,
             symbol=symbol,
             instrument_type=instrument_type,
         )
         if existing_position is not None:
-            raise TradingError(f"Open position already exists for {strategy_name or 'manual'} on {symbol}.")
+            raise TradingError(f"Open position already exists for {stored_strategy_name} on {symbol}.")
 
         strategy = None
         if strategy_name and strategy_name in self.registry.names():
@@ -436,7 +545,7 @@ class ExecutionService:
         entry_side = _entry_side(position_side)
         if not risk.allowed:
             self._reject_order(
-                strategy_name=strategy_name,
+                strategy_name=stored_strategy_name,
                 symbol=symbol,
                 instrument_type=instrument_type,
                 margin_mode=selected_margin_mode,
@@ -475,7 +584,7 @@ class ExecutionService:
         )
         report = self._exchange(instrument_type).place_order(request)
         order = self._persist_order(
-            strategy_name=strategy_name,
+            strategy_name=stored_strategy_name,
             request=request,
             normalized=normalized,
             report=report,
@@ -483,7 +592,7 @@ class ExecutionService:
 
         if report.filled_quantity > 0 and report.fill_price is not None:
             position = self._record_entry_fill(
-                strategy_name=strategy_name,
+                strategy_name=stored_strategy_name,
                 normalized=normalized,
                 order=order,
                 report=report,
@@ -500,7 +609,7 @@ class ExecutionService:
                 {
                     "order_id": order.id,
                     "position_id": position.id,
-                    "strategy_name": strategy_name,
+                    "strategy_name": stored_strategy_name,
                     "symbol": symbol,
                     "instrument_type": instrument_type.value,
                 },
@@ -511,7 +620,7 @@ class ExecutionService:
                 "INFO",
                 "order_open",
                 f"Submitted resting order for {symbol}.",
-                {"order_id": order.id, "strategy_name": strategy_name, "symbol": symbol},
+                {"order_id": order.id, "strategy_name": stored_strategy_name, "symbol": symbol},
             )
         self.db.commit()
         self.portfolio_service.recalculate_state({symbol: report.fill_price or reference_price})
@@ -704,10 +813,13 @@ class ExecutionService:
         limit: int = 300,
         instrument_type: InstrumentType | None = None,
         execution_model: str | None = None,
+        now: datetime | None = None,
     ) -> dict[str, object]:
+        now = now or datetime.now(timezone.utc)
         instrument_type = instrument_type or (
             InstrumentType.PERPETUAL if self.settings.enable_derivatives else InstrumentType.SPOT
         )
+        strategy_instance_name = f"{strategy_name}@{timeframe}"
         strategy = self.registry.create_strategy(strategy_name, db=self.db)
         frame = self.data_service.get_historical_data(
             symbol=symbol,
@@ -718,52 +830,107 @@ class ExecutionService:
         if frame.empty:
             return {"action": "no_data", "strategy_name": strategy_name, "symbol": symbol}
         signal_frame = strategy.generate_signals(frame)
-        latest = signal_frame.iloc[-1]
-        latest_price = float(latest["close"])
+        latest_market = signal_frame.iloc[-1]
+        latest_price = float(latest_market["close"])
+        selected_bar_timestamp, selected_row, selection_reason = self._selected_signal_row(
+            signal_frame=signal_frame,
+            timeframe=timeframe,
+            now=now,
+        )
         open_position = self.portfolio_service.get_position(
-            strategy_name=strategy_name,
+            strategy_name=strategy_instance_name,
             symbol=symbol,
             instrument_type=instrument_type,
         )
+        if selected_bar_timestamp is None or selected_row is None:
+            self.portfolio_service.recalculate_state({symbol: latest_price})
+            return {
+                "action": "hold" if open_position is not None else "flat",
+                "reason": selection_reason,
+                "strategy_name": strategy_name,
+                "symbol": symbol,
+            }
+        if self._bar_already_processed(
+            strategy_name=strategy_instance_name,
+            symbol=symbol,
+            instrument_type=instrument_type,
+            bar_timestamp=selected_bar_timestamp,
+        ):
+            self.portfolio_service.recalculate_state({symbol: latest_price})
+            return {
+                "action": "hold" if open_position is not None else "flat",
+                "reason": "bar_already_processed",
+                "strategy_name": strategy_name,
+                "symbol": symbol,
+            }
 
         if open_position is not None:
             self.portfolio_service.recalculate_state({symbol: latest_price})
             if open_position.liquidation_price:
-                if open_position.side == PositionSide.LONG and float(latest["low"]) <= open_position.liquidation_price:
+                if (
+                    open_position.side == PositionSide.LONG
+                    and float(selected_row["low"]) <= open_position.liquidation_price
+                ):
                     self.close_position(open_position, open_position.liquidation_price, "liquidation")
                     return {"action": "exit", "reason": "liquidation", "strategy_name": strategy_name}
-                if open_position.side == PositionSide.SHORT and float(latest["high"]) >= open_position.liquidation_price:
+                if (
+                    open_position.side == PositionSide.SHORT
+                    and float(selected_row["high"]) >= open_position.liquidation_price
+                ):
                     self.close_position(open_position, open_position.liquidation_price, "liquidation")
                     return {"action": "exit", "reason": "liquidation", "strategy_name": strategy_name}
             if open_position.stop_loss_price:
-                if open_position.side == PositionSide.LONG and float(latest["low"]) <= open_position.stop_loss_price:
+                if open_position.side == PositionSide.LONG and float(selected_row["low"]) <= open_position.stop_loss_price:
                     self.close_position(open_position, open_position.stop_loss_price, "stop_loss")
                     return {"action": "exit", "reason": "stop_loss", "strategy_name": strategy_name}
-                if open_position.side == PositionSide.SHORT and float(latest["high"]) >= open_position.stop_loss_price:
+                if open_position.side == PositionSide.SHORT and float(selected_row["high"]) >= open_position.stop_loss_price:
                     self.close_position(open_position, open_position.stop_loss_price, "stop_loss")
                     return {"action": "exit", "reason": "stop_loss", "strategy_name": strategy_name}
             if open_position.take_profit_price:
-                if open_position.side == PositionSide.LONG and float(latest["high"]) >= open_position.take_profit_price:
+                if (
+                    open_position.side == PositionSide.LONG
+                    and float(selected_row["high"]) >= open_position.take_profit_price
+                ):
                     self.close_position(open_position, open_position.take_profit_price, "take_profit")
                     return {"action": "exit", "reason": "take_profit", "strategy_name": strategy_name}
-                if open_position.side == PositionSide.SHORT and float(latest["low"]) <= open_position.take_profit_price:
+                if (
+                    open_position.side == PositionSide.SHORT
+                    and float(selected_row["low"]) <= open_position.take_profit_price
+                ):
                     self.close_position(open_position, open_position.take_profit_price, "take_profit")
                     return {"action": "exit", "reason": "take_profit", "strategy_name": strategy_name}
-            signal_side = strategy.desired_position_side(latest)
-            opposite_signal = bool(latest.get("entry", False)) and signal_side != open_position.side
-            if strategy.should_exit(latest, has_position=True) or opposite_signal:
-                self.close_position(open_position, latest_price, "strategy_exit")
+            signal_side = strategy.desired_position_side(selected_row)
+            opposite_signal = bool(selected_row.get("entry", False)) and signal_side != open_position.side
+            if strategy.should_exit(selected_row, has_position=True) or opposite_signal:
+                self.close_position(open_position, float(selected_row["close"]), "strategy_exit")
                 return {"action": "exit", "reason": "strategy_exit", "strategy_name": strategy_name}
             return {"action": "hold", "strategy_name": strategy_name, "symbol": symbol}
 
-        if strategy.should_enter(latest, has_position=False):
-            signal_side = strategy.desired_position_side(latest)
+        cooldown_until = self._strategy_cooldown_until(
+            strategy_name=strategy_instance_name,
+            symbol=symbol,
+            instrument_type=instrument_type,
+            timeframe=timeframe,
+            now=now,
+        )
+        if cooldown_until is not None:
+            return {
+                "action": "flat",
+                "reason": "strategy_cooldown_active",
+                "cooldown_until": cooldown_until.isoformat(),
+                "strategy_name": strategy_name,
+                "symbol": symbol,
+            }
+
+        if strategy.should_enter(selected_row, has_position=False):
+            signal_side = strategy.desired_position_side(selected_row)
             if instrument_type == InstrumentType.SPOT and signal_side == PositionSide.SHORT:
                 return {"action": "flat", "reason": "spot_short_disabled", "strategy_name": strategy_name}
             order = self.submit_entry_order(
                 strategy_name=strategy_name,
+                strategy_instance_name=strategy_instance_name,
                 symbol=symbol,
-                reference_price=latest_price,
+                reference_price=float(selected_row["close"]),
                 instrument_type=instrument_type,
                 margin_mode=MarginMode.ISOLATED if instrument_type == InstrumentType.PERPETUAL else MarginMode.CASH,
                 leverage=self.settings.default_leverage if instrument_type == InstrumentType.PERPETUAL else 1.0,

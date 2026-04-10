@@ -165,16 +165,25 @@ class DataService:
         limit: int,
         instrument_type: InstrumentType = InstrumentType.SPOT,
         use_cached_only: bool = False,
+        refresh: bool = False,
     ) -> pd.DataFrame:
         validate_timeframe(timeframe)
         cache = self._redis()
-        if cache is not None and not use_cached_only:
+        if cache is not None and not use_cached_only and not refresh:
             cached = cache.get(self._cache_key(symbol, timeframe, limit, instrument_type))
             if cached:
                 records = json.load(StringIO(cached))
                 frame = pd.DataFrame.from_records(records)
                 frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
                 return frame.set_index("timestamp")
+
+        if refresh and not use_cached_only:
+            return self.fetch_from_exchange(
+                symbol=symbol,
+                timeframe=timeframe,
+                limit=limit,
+                instrument_type=instrument_type,
+            ).tail(limit)
 
         frame = self.load_from_db(symbol=symbol, timeframe=timeframe, limit=limit, instrument_type=instrument_type)
         if len(frame) >= limit or use_cached_only:

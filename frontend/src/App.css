@@ -885,6 +885,18 @@
   background: var(--primary);
 }
 
+.equity-bar.is-positive {
+  background: var(--primary);
+}
+
+.equity-bar.is-critical {
+  background: var(--critical);
+}
+
+.trade-equity-strip {
+  min-height: 7rem;
+}
+
 .code-block {
   overflow-x: auto;
   border: 1px solid rgba(66, 72, 81, 0.18);
