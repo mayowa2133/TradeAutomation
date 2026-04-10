@@ -1,0 +1,116 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+:root {
+  --background: #0c0e11;
+  --surface-low: #111418;
+  --surface-base: #161a1f;
+  --surface-high: #1b2027;
+  --surface-highest: #20262e;
+  --surface-bright: #252d36;
+  --ghost-border: rgba(66, 72, 81, 0.2);
+  --outline: #707680;
+  --text: #e0e6f1;
+  --text-dim: #a5abb6;
+  --text-muted: #7d8692;
+  --primary: #4de082;
+  --warning: #e6ad03;
+  --critical: #ff716a;
+  --mono:
+    'SFMono-Regular', 'Menlo', 'Monaco', 'Liberation Mono', 'Courier New', monospace;
+  color: var(--text);
+  background: var(--background);
+  font-family: 'Inter', system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  font-synthesis: none;
+  line-height: 1.5;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--background);
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: var(--background);
+  color: var(--text);
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background-image:
+    linear-gradient(rgba(66, 72, 81, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(66, 72, 81, 0.06) 1px, transparent 1px);
+  background-size: 24px 24px;
+  opacity: 0.14;
+  pointer-events: none;
+}
+
+button,
+input,
+select,
+textarea {
+  border-radius: 0;
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+button,
+input,
+select,
+textarea,
+pre {
+  font-variant-numeric: tabular-nums;
+}
+
+input,
+select,
+textarea {
+  border: 1px solid var(--ghost-border);
+  background: rgba(12, 14, 17, 0.92);
+  color: var(--text);
+  padding: 0.75rem 0.85rem;
+}
+
+input:focus,
+select:focus,
+textarea:focus,
+button:focus-visible {
+  outline: 1px solid var(--primary);
+  outline-offset: 1px;
+}
+
+h1,
+h2,
+h3,
+p,
+pre {
+  margin: 0;
+}
+
+a {
+  color: inherit;
+}
+
+#root {
+  min-height: 100vh;
+}

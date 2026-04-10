@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_app_settings, get_strategy_registry
 from app.core.config import Settings
+from app.core.enums import InstrumentType
 from app.db.session import get_db
 from app.schemas.backtest import BacktestRequest, BacktestResponse
 from app.services.backtest_service import BacktestService
@@ -27,6 +28,7 @@ def run_backtest(
             symbol=request.symbol,
             timeframe=request.timeframe,
             limit=request.limit,
+            instrument_type=request.instrument_type,
             use_cached_only=request.use_cached_data_only,
         )
     except Exception as exc:
@@ -39,6 +41,11 @@ def run_backtest(
         symbol=request.symbol,
         timeframe=request.timeframe,
         market_data=data,
+        instrument_type=request.instrument_type,
+        margin_mode=request.margin_mode,
+        leverage=request.leverage,
+        execution_model=request.execution_model,
+        allow_candle_fallback=request.allow_candle_fallback,
         persist_run=request.persist_run,
         fee_bps=request.fee_bps,
         slippage_bps=request.slippage_bps,

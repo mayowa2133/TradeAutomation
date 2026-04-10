@@ -5,9 +5,9 @@ from typing import Any
 import ccxt
 
 from app.core.config import Settings
-from app.core.enums import OrderSide, OrderStatus, OrderType
+from app.core.enums import OrderStatus, OrderType
 from app.core.exceptions import ConfigurationError, ExchangeAdapterError
-from app.exchanges.base import ExchangeAdapter, ExecutionReport
+from app.exchanges.base import ExchangeAdapter, ExecutionReport, OrderRequest
 from app.utils.fees import calculate_fee
 
 
@@ -38,51 +38,46 @@ class CCXTExchange(ExchangeAdapter):
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 500) -> list[list[float]]:
         return self.client.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
 
-    def place_market_order(
-        self, symbol: str, side: OrderSide, quantity: float, reference_price: float
-    ) -> ExecutionReport:
+    def place_order(self, request: OrderRequest) -> ExecutionReport:
         self._require_private()
-        order = self.client.create_order(symbol, "market", side.value, quantity)
-        fill_price = float(order.get("average") or order.get("price") or reference_price)
-        filled_qty = float(order.get("filled") or quantity)
-        fee_paid = calculate_fee(fill_price * filled_qty, self.settings.default_fee_bps)
-        return ExecutionReport(
-            client_order_id=str(order.get("clientOrderId") or order.get("id")),
-            exchange_order_id=str(order.get("id")),
-            status=OrderStatus.FILLED if order.get("status") == "closed" else OrderStatus.NEW,
-            side=side,
-            order_type=OrderType.MARKET,
-            filled_quantity=filled_qty,
-            fill_price=fill_price,
-            fee_paid=fee_paid,
-            slippage_bps=0.0,
-            notes=f"Live CCXT market order on {self.settings.exchange_name}.",
+        params: dict[str, Any] = {}
+        if request.post_only:
+            params["postOnly"] = True
+        if request.reduce_only:
+            params["reduceOnly"] = True
+        price = request.limit_price if request.order_type == OrderType.LIMIT else None
+        order = self.client.create_order(
+            request.exchange_symbol,
+            request.order_type.value,
+            request.side.value,
+            request.quantity,
+            price,
+            params=params,
         )
-
-    def place_limit_order(
-        self,
-        symbol: str,
-        side: OrderSide,
-        quantity: float,
-        limit_price: float,
-        reference_price: float,
-    ) -> ExecutionReport:
-        self._require_private()
-        order = self.client.create_order(symbol, "limit", side.value, quantity, limit_price)
-        status = OrderStatus.NEW if order.get("status") == "open" else OrderStatus.FILLED
+        fill_price = float(order.get("average") or order.get("price") or request.reference_price)
         filled_qty = float(order.get("filled") or 0.0)
-        fee_paid = calculate_fee(limit_price * filled_qty, self.settings.default_fee_bps)
+        fee_paid = calculate_fee(fill_price * filled_qty, self.settings.default_fee_bps)
+        remaining = max(request.quantity - filled_qty, 0.0)
+        status_raw = str(order.get("status") or "").lower()
+        if filled_qty > 0 and remaining > 0:
+            status = OrderStatus.PARTIALLY_FILLED
+        elif status_raw in {"closed", "filled"} or remaining == 0:
+            status = OrderStatus.FILLED
+        else:
+            status = OrderStatus.NEW
         return ExecutionReport(
             client_order_id=str(order.get("clientOrderId") or order.get("id")),
             exchange_order_id=str(order.get("id")),
             status=status,
-            side=side,
-            order_type=OrderType.LIMIT,
+            side=request.side,
+            order_type=request.order_type,
+            requested_quantity=request.quantity,
             filled_quantity=filled_qty,
-            fill_price=float(order.get("average") or limit_price) if filled_qty else None,
+            remaining_quantity=remaining,
+            fill_price=fill_price,
             fee_paid=fee_paid,
             slippage_bps=0.0,
-            notes=f"Live CCXT limit order on {self.settings.exchange_name}.",
+            notes=f"Live CCXT {request.order_type.value} order on {self.settings.exchange_name}.",
         )
 
     def cancel_order(self, client_order_id: str) -> bool:

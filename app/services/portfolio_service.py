@@ -6,11 +6,15 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
-from app.core.enums import PositionStatus, TradeAction
+from app.core.enums import InstrumentType, PositionSide, PositionStatus
 from app.db.models.order import Order
 from app.db.models.portfolio_state import PortfolioState
 from app.db.models.position import Position
 from app.db.models.trade import Trade
+
+
+def _direction(side: PositionSide) -> float:
+    return -1.0 if side == PositionSide.SHORT else 1.0
 
 
 class PortfolioService:
@@ -35,6 +39,9 @@ class PortfolioService:
                 peak_equity=starting_balance,
                 realized_pnl=0.0,
                 unrealized_pnl=0.0,
+                margin_used=0.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
             )
             self.db.add(state)
             self.db.commit()
@@ -50,6 +57,25 @@ class PortfolioService:
             )
             .order_by(Position.opened_at.asc())
             .all()
+        )
+
+    def get_position(
+        self,
+        *,
+        strategy_name: str,
+        symbol: str,
+        instrument_type: InstrumentType,
+    ) -> Position | None:
+        return (
+            self.db.query(Position)
+            .filter(
+                Position.mode == self.settings.trading_mode,
+                Position.strategy_name == strategy_name,
+                Position.symbol == symbol,
+                Position.instrument_type == instrument_type,
+                Position.status == PositionStatus.OPEN,
+            )
+            .one_or_none()
         )
 
     def get_orders(self, limit: int = 100) -> list[Order]:
@@ -70,49 +96,62 @@ class PortfolioService:
             .all()
         )
 
+    def _trade_cash_balance(self) -> float:
+        cash_flow = (
+            self.db.query(func.coalesce(func.sum(Trade.cash_flow), 0.0))
+            .filter(Trade.mode == self.settings.trading_mode)
+            .scalar()
+            or 0.0
+        )
+        return float(self.get_or_create_state().starting_balance + cash_flow)
+
+    def _realized_pnl(self) -> float:
+        realized = (
+            self.db.query(func.coalesce(func.sum(Trade.realized_pnl), 0.0))
+            .filter(Trade.mode == self.settings.trading_mode)
+            .scalar()
+            or 0.0
+        )
+        return float(realized)
+
     def recalculate_state(self, latest_prices: dict[str, float] | None = None) -> PortfolioState:
         latest_prices = latest_prices or {}
         state = self.get_or_create_state()
 
-        entry_trades = (
-            self.db.query(Trade)
-            .filter(Trade.mode == self.settings.trading_mode, Trade.action == TradeAction.ENTRY)
-            .all()
-        )
-        exit_trades = (
-            self.db.query(Trade)
-            .filter(Trade.mode == self.settings.trading_mode, Trade.action == TradeAction.EXIT)
-            .all()
-        )
-
-        cash_balance = state.starting_balance
-        cash_balance -= sum(trade.notional + trade.fee_paid for trade in entry_trades)
-        cash_balance += sum(trade.notional - trade.fee_paid for trade in exit_trades)
-
+        cash_balance = self._trade_cash_balance()
         open_positions = self.get_open_positions()
-        market_value = 0.0
+
+        equity_contribution = 0.0
         unrealized_pnl = 0.0
+        margin_used = 0.0
+        gross_exposure = 0.0
+        net_exposure = 0.0
+
         for position in open_positions:
             last_price = float(latest_prices.get(position.symbol, position.current_price or position.avg_entry_price))
+            direction = _direction(position.side)
+            notional = position.quantity * last_price
+            pnl = direction * (last_price - position.avg_entry_price) * position.quantity
+
             position.current_price = last_price
-            position.unrealized_pnl = (last_price - position.avg_entry_price) * position.quantity
-            market_value += last_price * position.quantity
-            unrealized_pnl += position.unrealized_pnl
+            position.unrealized_pnl = pnl
+            unrealized_pnl += pnl
+            gross_exposure += abs(notional)
+            net_exposure += direction * notional
 
-        realized_pnl = (
-            self.db.query(func.coalesce(func.sum(Position.realized_pnl), 0.0))
-            .filter(
-                Position.mode == self.settings.trading_mode,
-                Position.status == PositionStatus.CLOSED,
-            )
-            .scalar()
-            or 0.0
-        )
+            if position.instrument_type == InstrumentType.SPOT and position.side == PositionSide.LONG:
+                equity_contribution += position.quantity * last_price
+            else:
+                margin_used += position.collateral
+                equity_contribution += position.collateral + pnl
 
-        equity = cash_balance + market_value
+        equity = cash_balance + equity_contribution
         state.cash_balance = float(cash_balance)
-        state.realized_pnl = float(realized_pnl)
+        state.realized_pnl = self._realized_pnl()
         state.unrealized_pnl = float(unrealized_pnl)
+        state.margin_used = float(margin_used)
+        state.gross_exposure = float(gross_exposure)
+        state.net_exposure = float(net_exposure)
         state.last_equity = float(equity)
         state.peak_equity = max(float(state.peak_equity), float(equity))
         state.updated_at = datetime.now(timezone.utc)
@@ -134,4 +173,7 @@ class PortfolioService:
             "equity": state.last_equity,
             "peak_equity": state.peak_equity,
             "drawdown_pct": drawdown_pct,
+            "margin_used": state.margin_used,
+            "gross_exposure": state.gross_exposure,
+            "net_exposure": state.net_exposure,
         }

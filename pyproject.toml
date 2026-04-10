@@ -15,11 +15,14 @@ authors = [
 dependencies = [
   "alembic>=1.13.2,<2.0.0",
   "apscheduler>=3.10.4,<4.0.0",
+  "anthropic>=0.57.1,<1.0.0",
   "ccxt>=4.4.0,<5.0.0",
+  "feedparser>=6.0.11,<7.0.0",
   "fastapi>=0.115.0,<1.0.0",
   "joblib>=1.4.2,<2.0.0",
   "lightgbm>=4.5.0,<5.0.0",
   "numpy>=1.26.4,<3.0.0",
+  "openai>=1.75.0,<2.0.0",
   "pandas>=2.2.3,<3.0.0",
   "psycopg[binary]>=3.2.3,<4.0.0",
   "pydantic>=2.9.2,<3.0.0",
@@ -29,6 +32,7 @@ dependencies = [
   "scikit-learn>=1.5.2,<2.0.0",
   "sqlalchemy>=2.0.36,<3.0.0",
   "uvicorn[standard]>=0.32.0,<1.0.0",
+  "websockets>=13.1,<16.0",
 ]
 
 [project.optional-dependencies]

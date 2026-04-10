@@ -21,6 +21,9 @@ class PortfolioState(Base):
     peak_equity: Mapped[float] = mapped_column(Float)
     realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
     unrealized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    margin_used: Mapped[float] = mapped_column(Float, default=0.0)
+    gross_exposure: Mapped[float] = mapped_column(Float, default=0.0)
+    net_exposure: Mapped[float] = mapped_column(Float, default=0.0)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

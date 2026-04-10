@@ -9,7 +9,7 @@ from app.utils.indicators import ema
 class EMACrossoverStrategy(BaseStrategy):
     metadata = StrategyMetadata(
         name="ema_crossover",
-        description="Long-only EMA crossover momentum strategy.",
+        description="Bidirectional EMA crossover momentum strategy for spot and perpetual trend following.",
         default_parameters={
             "fast_window": 9,
             "slow_window": 21,
@@ -32,7 +32,8 @@ class EMACrossoverStrategy(BaseStrategy):
             df["ema_fast"].shift(1) >= df["ema_slow"].shift(1)
         )
         df.loc[bullish_cross, "signal"] = 1
-        df["entry"] = bullish_cross.fillna(False)
-        df["exit"] = bearish_cross.fillna(False)
+        df.loc[bearish_cross, "signal"] = -1
+        df["entry"] = (bullish_cross | bearish_cross).fillna(False)
+        df["exit"] = (bullish_cross | bearish_cross).fillna(False)
         df["confidence"] = ((df["ema_fast"] - df["ema_slow"]).abs() / df["close"]).fillna(0.0)
         return df

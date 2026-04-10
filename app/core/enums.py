@@ -6,6 +6,17 @@ class TradingMode(str, Enum):
     LIVE = "live"
 
 
+class InstrumentType(str, Enum):
+    SPOT = "spot"
+    PERPETUAL = "perpetual"
+
+
+class MarginMode(str, Enum):
+    CASH = "cash"
+    ISOLATED = "isolated"
+    CROSS = "cross"
+
+
 class OrderSide(str, Enum):
     BUY = "buy"
     SELL = "sell"
@@ -18,6 +29,7 @@ class OrderType(str, Enum):
 
 class OrderStatus(str, Enum):
     NEW = "new"
+    PARTIALLY_FILLED = "partially_filled"
     FILLED = "filled"
     CANCELED = "canceled"
     REJECTED = "rejected"
@@ -25,6 +37,7 @@ class OrderStatus(str, Enum):
 
 class PositionSide(str, Enum):
     LONG = "long"
+    SHORT = "short"
 
 
 class PositionStatus(str, Enum):
@@ -35,9 +48,25 @@ class PositionStatus(str, Enum):
 class TradeAction(str, Enum):
     ENTRY = "entry"
     EXIT = "exit"
+    FUNDING = "funding"
 
 
 class StrategyRunStatus(str, Enum):
     STARTED = "started"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class DecisionSource(str, Enum):
+    STRATEGY = "strategy"
+    OPTIMIZER = "optimizer"
+    LLM = "llm"
+    MANUAL = "manual"
+    SYSTEM = "system"
+
+
+class StreamHealth(str, Enum):
+    DISCONNECTED = "disconnected"
+    CONNECTING = "connecting"
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"

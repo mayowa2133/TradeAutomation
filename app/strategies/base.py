@@ -6,6 +6,8 @@ from typing import Any
 
 import pandas as pd
 
+from app.core.enums import PositionSide
+
 
 @dataclass(slots=True)
 class StrategyMetadata:
@@ -34,6 +36,10 @@ class BaseStrategy(ABC):
     def should_exit(self, row: pd.Series, has_position: bool) -> bool:
         return bool(row.get("exit", False)) and has_position
 
+    def desired_position_side(self, row: pd.Series) -> PositionSide:
+        signal = float(row.get("signal", 0.0) or 0.0)
+        return PositionSide.SHORT if signal < 0 else PositionSide.LONG
+
     def stop_loss_pct(self) -> float:
         return float(self.params.get("stop_loss_pct", 0.02))
 
@@ -46,13 +52,14 @@ class BaseStrategy(ABC):
         price: float,
         risk_fraction: float,
         max_notional_fraction: float,
+        leverage: float = 1.0,
     ) -> float:
         if cash_balance <= 0 or price <= 0:
             return 0.0
         risk_budget = cash_balance * risk_fraction
         stop_distance = max(price * self.stop_loss_pct(), price * 0.0025)
         qty_by_risk = risk_budget / stop_distance
-        qty_by_notional = (cash_balance * max_notional_fraction) / price
+        qty_by_notional = (cash_balance * max_notional_fraction * max(leverage, 1.0)) / price
         quantity = min(qty_by_risk, qty_by_notional)
         return round(max(quantity, 0.0), 8)
 

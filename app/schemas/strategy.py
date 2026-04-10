@@ -51,6 +51,16 @@ class RiskStateResponse(BaseModel):
     drawdown_pct: float
     drawdown_limit_pct: float
     blocked_symbols: list[str]
+    equity: float
+    cash_balance: float
+    margin_used: float
+    gross_exposure: float
+    net_exposure: float
+    max_gross_exposure_pct: float
+    max_net_exposure_pct: float
+    max_side_exposure_pct: float
+    long_exposure: float
+    short_exposure: float
 
 
 class EventLogRead(BaseModel):

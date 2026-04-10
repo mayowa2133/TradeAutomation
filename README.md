@@ -1,61 +1,75 @@
-# Trade Automation MVP
+# Trade Automation Platform
 
-Safety-first crypto trading automation built with FastAPI, SQLAlchemy, PostgreSQL, Redis, APScheduler, CCXT, Pandas, and scikit-learn/LightGBM. The system defaults to paper trading and keeps live execution disabled unless you explicitly enable it.
+Safety-first crypto trading automation with FastAPI, SQLAlchemy, PostgreSQL, Redis, APScheduler, CCXT, Bybit perpetual support, a React desktop operations dashboard, and explicit paper-trading defaults.
 
-## Safety Warning
+## Safety First
 
 Live trading is risky and disabled by default.
 
 - `TRADING_MODE=paper` is the default.
 - `ENABLE_LIVE_TRADING=false` is the default.
-- Live execution fails closed if the explicit enable flag is missing.
-- Exchange credentials are never hardcoded and must be supplied through environment variables.
-- The risk engine can block entries on kill switch, drawdown, daily loss, cooldown, session filter, position count, spread, and symbol allowlist checks.
+- Live execution fails closed unless the explicit mode flag and the required credentials are both present.
+- LLM-triggered execution is allowed only for backtests and paper mode when you explicitly enable it.
+- LLM-triggered live trading is blocked by design.
+- The system makes no profitability claims.
 
-This repository does not claim profitability. The included strategies are examples of modular execution and research workflows, not trading advice.
+## What This Repository Can Do
 
-## What Is Included
+- ingest historical crypto OHLCV through CCXT for spot and Bybit USDT perpetuals
+- persist instruments, candles, quotes, depth snapshots, trades, orders, positions, optimizer runs, news items, and LLM decisions
+- stream Bybit public market data through a dedicated websocket worker
+- run EMA crossover, RSI mean reversion, breakout, and experimental ML filter strategies with long and short signal support
+- simulate paper trading with leverage-aware perpetual accounting, long/short positions, and depth-aware fills
+- optionally place live spot or Bybit perpetual orders behind explicit safety gates
+- apply deterministic risk controls for drawdown, daily loss, leverage, liquidation distance, spread, slippage, exposure caps, cooldowns, and kill switch state
+- run backtests for spot or perpetual instruments with leverage, liquidation thresholds, fees, and funding-aware accounting
+- expose REST and websocket interfaces for monitoring, manual operations, optimizer runs, news review, and LLM review
+- serve a desktop-first React operations dashboard from `frontend/`
 
-- Historical OHLCV ingestion through CCXT with database persistence and optional Redis caching
-- Strategy framework with EMA crossover, RSI mean reversion, breakout, and experimental ML-assisted direction filter
-- Paper broker with fee-aware fills, limit-order handling, and persisted orders/trades/positions
-- Optional live broker adapter behind explicit safety gating
-- Event-driven backtesting with slippage, fees, equity curve, drawdown, and strategy metrics
-- FastAPI monitoring/control surface
-- APScheduler worker for periodic data refresh and signal evaluation
-- Alembic migrations, pytest coverage, Dockerfile, and docker-compose stack
-- Repository memory files for future human and AI contributors
+## Stitch
+
+The dashboard work is anchored to the Google Stitch project configured in this repo:
+
+- Stitch project id: `1872692140714476366`
+
+The coded frontend was built to match that desktop operations brief. Stitch project creation succeeded, but direct screen generation from the current MCP endpoint returned `invalid argument` responses during implementation, so the UI was coded directly while keeping the same design direction and project reference.
 
 ## Quick Start
 
-### Local development
-
-1. Copy the environment template:
+### Local backend
 
 ```bash
 cp .env.example .env
-```
-
-2. Install dependencies with `uv`:
-
-```bash
 uv venv
 source .venv/bin/activate
 uv pip install -e .[dev]
-```
-
-3. Run the API:
-
-```bash
 uv run alembic upgrade head
 uv run uvicorn app.main:app --reload
 ```
 
-4. Run the scheduler worker in a second terminal:
+### Local workers
+
+Scheduler worker:
 
 ```bash
 uv run python -m app.workers.runner
 ```
+
+Bybit websocket worker:
+
+```bash
+STREAM_WORKER_ENABLED=true uv run python -m app.workers.stream_runner
+```
+
+### Local frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+The Vite dev server proxies `/api` and `/ws` to `http://localhost:8000`.
 
 ### Docker Compose
 
@@ -66,85 +80,138 @@ docker compose up --build
 
 Services:
 
-- API: `http://localhost:8000`
-- OpenAPI docs: `http://localhost:8000/docs`
+- API: [http://localhost:8000](http://localhost:8000)
+- OpenAPI docs: [http://localhost:8000/docs](http://localhost:8000/docs)
+- Frontend dashboard: [http://localhost:4173](http://localhost:4173)
 - PostgreSQL: `localhost:5432`
 - Redis: `localhost:6379`
 
-## Environment Variables
+## Important Environment Variables
 
-Key settings in `.env.example`:
+Core runtime:
 
 - `TRADING_MODE`: `paper` or `live`
-- `ENABLE_LIVE_TRADING`: must be `true` for live order placement
-- `DATABASE_URL`: PostgreSQL in Docker, SQLite or PostgreSQL locally
-- `REDIS_URL`: optional cache/event backend
-- `EXCHANGE_NAME`: CCXT exchange id, default `kraken`
-- `EXCHANGE_API_KEY`, `EXCHANGE_API_SECRET`, `EXCHANGE_API_PASSWORD`: only needed for live trading
-- `SYMBOL_ALLOWLIST`: comma-separated symbols allowed for entries
-- `MAX_RISK_PER_TRADE`, `MAX_DAILY_LOSS_PCT`, `MAX_DRAWDOWN_PCT`: deterministic hard risk limits
-- `SCHEDULER_ENABLED`: enables APScheduler jobs in the worker process
-- `LLM_FEATURES_ENABLED`: keeps optional LLM hooks disabled by default
+- `ENABLE_LIVE_TRADING`: explicit live enable gate
+- `DATABASE_URL`
+- `REDIS_URL`
+- `AUTO_CREATE_TABLES`
+- `SCHEDULER_ENABLED`
+- `STREAM_WORKER_ENABLED`
 
-## Database and Migrations
+Spot execution:
 
-Alembic is included for schema management:
+- `EXCHANGE_NAME`
+- `EXCHANGE_API_KEY`
+- `EXCHANGE_API_SECRET`
+- `EXCHANGE_API_PASSWORD`
 
-```bash
-uv run alembic upgrade head
-uv run alembic revision --autogenerate -m "describe change"
-```
+Perpetual execution:
 
-For local convenience, the app can auto-create tables when `AUTO_CREATE_TABLES=true`, but Alembic remains the intended migration path.
+- `DERIVATIVES_EXCHANGE_NAME`
+- `DERIVATIVES_API_KEY`
+- `DERIVATIVES_API_SECRET`
+- `BYBIT_WS_PUBLIC_URL`
 
-## Running a Backtest
+Risk and execution:
 
-CLI:
+- `MAX_RISK_PER_TRADE`
+- `MAX_DAILY_LOSS_PCT`
+- `MAX_DRAWDOWN_PCT`
+- `MAX_GROSS_EXPOSURE_PCT`
+- `MAX_NET_EXPOSURE_PCT`
+- `MAX_SIDE_EXPOSURE_PCT`
+- `MAX_LEVERAGE`
+- `MIN_LIQUIDATION_BUFFER_PCT`
+- `MAX_ABS_FUNDING_RATE`
+- `KILL_SWITCH`
 
-```bash
-uv run python scripts/run_backtest.py --strategy ema_crossover --symbol BTC/USDT --timeframe 5m --limit 300
-```
+Optional intelligence:
 
-API:
+- `NEWS_INGESTION_ENABLED`
+- `OPTIMIZER_ENABLED`
+- `LLM_FEATURES_ENABLED`
+- `LLM_PROVIDER`
+- `OPENAI_API_KEY`
+- `CLAUDE_API_KEY`
+- `LLM_AUTONOMY_PAPER`
+- `LLM_AUTONOMY_BACKTEST`
+- `LLM_AUTONOMY_LIVE`
 
-```bash
-curl -X POST http://localhost:8000/api/v1/backtests/run \
-  -H "Content-Type: application/json" \
-  -d '{"strategy_name":"ema_crossover","symbol":"BTC/USDT","timeframe":"5m","limit":300}'
-```
+## REST API Overview
 
-## Running a Paper Trade Demo
-
-```bash
-uv run python scripts/demo_paper_trade.py --strategy ema_crossover --symbol BTC/USDT --timeframe 5m
-```
-
-The demo fetches market data, evaluates the requested strategy, and only places a simulated paper order when the latest bar produces a valid entry signal and the risk engine approves it.
-
-## Training the Experimental ML Filter
-
-```bash
-uv run python scripts/train_model.py --symbol BTC/USDT --timeframe 5m --limit 600
-```
-
-The ML path is intentionally lightweight and experimental. It uses engineered OHLCV features and a simple classifier. Missing or stale models fail safely by producing neutral signals.
-
-## API Overview
+Core:
 
 - `GET /api/v1/health`
 - `GET /api/v1/config`
 - `GET /api/v1/strategies`
 - `POST /api/v1/strategies/{name}/toggle`
-- `POST /api/v1/backtests/run`
 - `GET /api/v1/paper/status`
+- `GET /api/v1/risk/state`
+- `GET /api/v1/events/recent`
+
+Execution and state:
+
 - `GET /api/v1/positions`
+- `POST /api/v1/positions/{position_id}/close`
 - `GET /api/v1/orders`
+- `POST /api/v1/orders/manual`
 - `POST /api/v1/orders/{order_id}/cancel`
 - `GET /api/v1/trades`
 - `GET /api/v1/pnl/summary`
-- `GET /api/v1/risk/state`
-- `GET /api/v1/events/recent`
+
+Market and instruments:
+
+- `GET /api/v1/instruments`
+- `GET /api/v1/market/depth`
+- `GET /api/v1/market/stream-status`
+
+Research and automation:
+
+- `POST /api/v1/backtests/run`
+- `POST /api/v1/optimizer/run`
+- `GET /api/v1/optimizer/latest`
+- `GET /api/v1/news`
+- `GET /api/v1/llm/decisions`
+- `POST /api/v1/llm/decisions`
+- `GET /api/v1/dashboard/summary`
+
+Websocket channels:
+
 - `GET /ws/events`
+- `GET /ws/market`
+- `GET /ws/execution`
+- `GET /ws/system`
+
+## Backtest Example
+
+```bash
+curl -X POST http://localhost:8000/api/v1/backtests/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "strategy_name": "ema_crossover",
+    "symbol": "BTC/USDT",
+    "timeframe": "5m",
+    "instrument_type": "perpetual",
+    "margin_mode": "isolated",
+    "leverage": 2,
+    "limit": 300
+  }'
+```
+
+## Manual Paper Order Example
+
+```bash
+curl -X POST http://localhost:8000/api/v1/orders/manual \
+  -H "Content-Type: application/json" \
+  -d '{
+    "symbol": "BTC/USDT",
+    "instrument_type": "perpetual",
+    "position_side": "short",
+    "quantity": 0.2,
+    "reference_price": 100000,
+    "leverage": 2
+  }'
+```
 
 ## Project Structure
 
@@ -152,36 +219,42 @@ The ML path is intentionally lightweight and experimental. It uses engineered OH
 app/
   api/          FastAPI routes and dependency helpers
   core/         configuration, logging, enums, exceptions
-  db/           SQLAlchemy session/base/models
-  exchanges/    paper and CCXT execution adapters
-  ml/           feature engineering, train/load/predict helpers
-  schemas/      Pydantic request/response models
-  services/     market data, execution, risk, portfolio, backtesting, scheduling
-  strategies/   strategy interface and concrete strategy implementations
-  utils/        indicators, fees, metrics, timeframe helpers
-  workers/      APScheduler tasks, jobs, and worker runner
-scripts/        local automation scripts
-tests/          deterministic tests with synthetic market data
+  db/           SQLAlchemy session and models
+  exchanges/    paper, CCXT spot, and Bybit perpetual adapters
+  ml/           engineered features and lightweight model helpers
+  schemas/      Pydantic request and response contracts
+  services/     execution, risk, market data, optimizer, news, dashboard, LLM hooks
+  strategies/   signal-generation layer
+  utils/        indicators, fees, metrics, depth helpers, precision helpers
+  workers/      scheduler jobs plus websocket stream runner
+frontend/
+  src/          React dashboard implementation
+  Dockerfile    production-style static frontend container
+tests/          backend regression coverage
 ```
 
-## Testing
+## Testing and Verification
+
+Backend:
 
 ```bash
 uv run pytest
+DATABASE_URL=sqlite:///./data/verify.db AUTO_CREATE_TABLES=false uv run alembic upgrade head
 ```
 
-The test suite covers:
+Frontend:
 
-- health endpoint
-- config safety defaults
-- strategy signal generation
-- risk guardrails
-- backtesting flow
-- paper exchange execution
+```bash
+cd frontend
+npm run lint
+npm run test
+npm run build
+```
 
-## Assumptions
+## Current Assumptions
 
-- v1 supports long-only spot trading for execution and paper simulation.
-- Market data uses CCXT public OHLCV endpoints.
-- Redis is optional at runtime for local development but wired into Docker and the data layer.
-- Live trading is intentionally narrow in scope and guarded more aggressively than paper trading.
+- Bybit USDT perpetuals are the first-class derivatives venue.
+- Perpetual execution is one-way mode with isolated-margin assumptions in the current implementation.
+- The frontend is desktop-first and responsive second.
+- News ingestion is RSS-first and designed to be replaceable.
+- LLM outputs are advisory intent sources, not direct execution authority.

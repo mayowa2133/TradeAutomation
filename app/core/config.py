@@ -29,13 +29,17 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     exchange_name: str = "kraken"
+    derivatives_exchange_name: str = "bybit"
     exchange_api_key: str | None = None
     exchange_api_secret: str | None = None
     exchange_api_password: str | None = None
+    derivatives_api_key: str | None = None
+    derivatives_api_secret: str | None = None
     default_quote_currency: str = "USDT"
 
     trading_mode: TradingMode = TradingMode.PAPER
     enable_live_trading: bool = False
+    enable_derivatives: bool = True
     kill_switch: bool = False
 
     paper_starting_balance: float = 100000.0
@@ -49,6 +53,14 @@ class Settings(BaseSettings):
     default_fee_bps: float = 10.0
     default_slippage_bps: float = 5.0
     stop_loss_cooldown_minutes: int = 30
+    default_leverage: float = 2.0
+    max_leverage: float = 5.0
+    max_gross_exposure_pct: float = 2.0
+    max_net_exposure_pct: float = 1.0
+    max_side_exposure_pct: float = 1.5
+    min_liquidation_buffer_pct: float = 0.015
+    max_abs_funding_rate: float = 0.005
+    default_maintenance_margin_pct: float = 0.005
 
     symbol_allowlist: str = "BTC/USDT,ETH/USDT,SOL/USDT"
     allowed_weekdays: str = "0,1,2,3,4,5,6"
@@ -60,10 +72,37 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = False
     market_refresh_seconds: int = 60
     signal_evaluation_seconds: int = 60
+    news_refresh_seconds: int = 900
+    optimizer_refresh_seconds: int = 300
+    stream_worker_enabled: bool = False
+    bybit_ws_public_url: str = "wss://stream.bybit.com/v5/public/linear"
+    precision_cache_ttl_seconds: int = 3600
+    default_execution_model: str = "candle"
 
     llm_features_enabled: bool = False
+    llm_provider: str = "openai"
+    llm_model: str = "gpt-4.1-mini"
+    llm_anthropic_model: str = "claude-3-5-sonnet-latest"
+    llm_autonomy_paper: bool = False
+    llm_autonomy_backtest: bool = False
+    llm_autonomy_live: bool = False
     openai_api_key: str | None = None
     claude_api_key: str | None = None
+
+    optimizer_enabled: bool = False
+    optimizer_lookback_periods: int = 96
+    optimizer_target_volatility: float = 0.18
+    optimizer_max_weight: float = 0.45
+    optimizer_min_weight: float = 0.05
+
+    news_ingestion_enabled: bool = False
+    news_rss_feeds: str = (
+        "https://www.coindesk.com/arc/outboundfeeds/rss/,"
+        "https://cointelegraph.com/rss,"
+        "https://decrypt.co/feed"
+    )
+
+    stitch_project_id: str | None = "1872692140714476366"
 
     cors_origins: list[str] = Field(default_factory=lambda: ["*"])
 
@@ -80,6 +119,10 @@ class Settings(BaseSettings):
         return [item.strip() for item in self.default_timeframes.split(",") if item.strip()]
 
     @property
+    def news_rss_feed_list(self) -> list[str]:
+        return [item.strip() for item in self.news_rss_feeds.split(",") if item.strip()]
+
+    @property
     def session_start(self) -> time:
         return time.fromisoformat(self.session_start_utc)
 
@@ -91,6 +134,10 @@ class Settings(BaseSettings):
     def live_trading_enabled(self) -> bool:
         return self.trading_mode == TradingMode.LIVE and self.enable_live_trading
 
+    @property
+    def paper_or_backtest_llm_autonomy_enabled(self) -> bool:
+        return self.llm_features_enabled and (self.llm_autonomy_paper or self.llm_autonomy_backtest)
+
     def require_live_trading_ready(self) -> None:
         if not self.live_trading_enabled:
             raise ConfigurationError(
@@ -101,9 +148,29 @@ class Settings(BaseSettings):
                 "Live trading requires EXCHANGE_API_KEY and EXCHANGE_API_SECRET."
             )
 
+    def require_live_derivatives_ready(self) -> None:
+        if not self.live_trading_enabled:
+            raise ConfigurationError(
+                "Live derivatives trading requested without TRADING_MODE=live and ENABLE_LIVE_TRADING=true."
+            )
+        if not self.derivatives_api_key or not self.derivatives_api_secret:
+            raise ConfigurationError(
+                "Live derivatives trading requires DERIVATIVES_API_KEY and DERIVATIVES_API_SECRET."
+            )
+        if self.llm_autonomy_live:
+            raise ConfigurationError("LLM-triggered live trading is explicitly disabled in this project.")
+
     def masked_config(self) -> dict[str, Any]:
         data = self.model_dump()
-        for key in ("exchange_api_key", "exchange_api_secret", "exchange_api_password"):
+        for key in (
+            "exchange_api_key",
+            "exchange_api_secret",
+            "exchange_api_password",
+            "derivatives_api_key",
+            "derivatives_api_secret",
+            "openai_api_key",
+            "claude_api_key",
+        ):
             if data.get(key):
                 data[key] = "***"
         return data

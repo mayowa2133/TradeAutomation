@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from sqlalchemy import JSON, DateTime, Enum, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.core.enums import StrategyRunStatus, TradingMode
+from app.core.enums import DecisionSource, StrategyRunStatus, TradingMode
 from app.db.session import Base
 
 
@@ -20,6 +20,10 @@ class StrategyRun(Base):
     status: Mapped[StrategyRunStatus] = mapped_column(
         Enum(StrategyRunStatus), default=StrategyRunStatus.STARTED
     )
+    decision_source: Mapped[DecisionSource] = mapped_column(
+        Enum(DecisionSource), default=DecisionSource.STRATEGY
+    )
+    execution_model: Mapped[str] = mapped_column(String(16), default="candle")
     parameters: Mapped[dict] = mapped_column(JSON, default=dict)
     metrics: Mapped[dict] = mapped_column(JSON, default=dict)
     started_at: Mapped[datetime] = mapped_column(

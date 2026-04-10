@@ -1,20 +1,34 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
-from app.core.enums import OrderSide, OrderStatus, OrderType, PositionSide, PositionStatus, TradeAction
+from app.core.enums import (
+    DecisionSource,
+    InstrumentType,
+    MarginMode,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    PositionSide,
+    PositionStatus,
+    TradeAction,
+)
 from app.core.exceptions import RiskCheckFailed, TradingError
 from app.db.models.order import Order
 from app.db.models.position import Position
 from app.db.models.trade import Trade
-from app.exchanges.base import ExchangeAdapter, ExecutionReport
+from app.exchanges.base import ExchangeAdapter, ExecutionReport, OrderRequest
+from app.exchanges.bybit_perp_exchange import BybitPerpExchange
 from app.exchanges.ccxt_exchange import CCXTExchange
 from app.exchanges.paper_exchange import PaperExchange
 from app.services.data_service import DataService
 from app.services.helpers import record_event
+from app.services.instrument_service import InstrumentService, NormalizedOrder
+from app.services.market_depth_service import MarketDepthService
 from app.services.portfolio_service import PortfolioService
 from app.services.risk_service import RiskService
 from app.services.strategy_registry import StrategyRegistry
@@ -32,6 +46,18 @@ def _get_paper_exchange(settings: Settings) -> PaperExchange:
     return _paper_exchange_singleton
 
 
+def _entry_side(position_side: PositionSide) -> OrderSide:
+    return OrderSide.SELL if position_side == PositionSide.SHORT else OrderSide.BUY
+
+
+def _exit_side(position_side: PositionSide) -> OrderSide:
+    return OrderSide.BUY if position_side == PositionSide.SHORT else OrderSide.SELL
+
+
+def _direction(position_side: PositionSide) -> float:
+    return -1.0 if position_side == PositionSide.SHORT else 1.0
+
+
 class ExecutionService:
     def __init__(
         self,
@@ -46,44 +72,114 @@ class ExecutionService:
         self.data_service = data_service or DataService(db=db, settings=settings)
         self.portfolio_service = PortfolioService(db=db, settings=settings)
         self.risk_service = RiskService(db=db, settings=settings)
+        self.instrument_service = InstrumentService(db=db, settings=settings)
+        self.market_depth_service = MarketDepthService(db=db)
 
-    def _exchange(self) -> ExchangeAdapter:
+    def _exchange(self, instrument_type: InstrumentType) -> ExchangeAdapter:
         if self.settings.live_trading_enabled:
+            if instrument_type == InstrumentType.PERPETUAL:
+                return BybitPerpExchange(settings=self.settings, allow_private=True)
             return CCXTExchange(settings=self.settings, allow_private=True)
         return _get_paper_exchange(self.settings)
 
-    def _persist_order(self, strategy_name: str, symbol: str, report: ExecutionReport) -> Order:
+    def _exchange_name(self, instrument_type: InstrumentType) -> str:
+        return (
+            self.settings.derivatives_exchange_name
+            if instrument_type == InstrumentType.PERPETUAL
+            else self.settings.exchange_name
+        )
+
+    def _build_depth_snapshot(
+        self,
+        *,
+        symbol: str,
+        instrument_type: InstrumentType,
+        supplied_snapshot: dict[str, list[list[float]]] | None,
+    ) -> dict[str, list[list[float]]] | None:
+        if supplied_snapshot is not None:
+            return supplied_snapshot
+        latest = self.market_depth_service.latest_orderbook(symbol, instrument_type)
+        if latest is None:
+            return None
+        return {"bids": latest.bids, "asks": latest.asks}
+
+    def _derive_spread_bps(self, symbol: str, instrument_type: InstrumentType, fallback: float = 0.0) -> float:
+        latest_quote = self.market_depth_service.latest_quote(symbol, instrument_type)
+        if latest_quote is None:
+            return fallback
+        return float(latest_quote.spread_bps)
+
+    def _persist_order(
+        self,
+        *,
+        strategy_name: str | None,
+        request: OrderRequest,
+        normalized: NormalizedOrder,
+        report: ExecutionReport,
+    ) -> Order:
         order = Order(
             client_order_id=report.client_order_id,
             exchange_order_id=report.exchange_order_id,
             strategy_name=strategy_name,
-            symbol=symbol,
-            side=report.side,
-            order_type=report.order_type,
+            symbol=request.symbol,
+            instrument_type=request.instrument_type,
+            margin_mode=request.margin_mode,
+            position_side=request.position_side,
+            source=request.decision_source,
+            side=request.side,
+            order_type=request.order_type,
             status=report.status,
             mode=self.settings.trading_mode,
-            quantity=report.filled_quantity if report.status == OrderStatus.FILLED else 0.0,
-            limit_price=report.fill_price if report.order_type == OrderType.LIMIT else None,
+            quantity=request.quantity,
+            filled_quantity=report.filled_quantity,
+            remaining_quantity=report.remaining_quantity,
+            limit_price=request.limit_price,
             fill_price=report.fill_price,
             fee_paid=report.fee_paid,
             slippage_bps=report.slippage_bps,
-            exchange_name=self.settings.exchange_name,
+            leverage=normalized.leverage,
+            reduce_only=request.reduce_only,
+            post_only=request.post_only,
+            tick_size=normalized.instrument.tick_size,
+            lot_size=normalized.instrument.lot_size,
+            min_notional=normalized.instrument.min_notional,
+            liquidation_price=None,
+            funding_cost=0.0,
+            exchange_name=self._exchange_name(request.instrument_type),
             notes=report.notes,
         )
         self.db.add(order)
         self.db.flush()
         return order
 
-    def _reject_order(self, strategy_name: str, symbol: str, side: OrderSide, reason: str) -> None:
+    def _reject_order(
+        self,
+        *,
+        strategy_name: str | None,
+        symbol: str,
+        instrument_type: InstrumentType,
+        margin_mode: MarginMode,
+        position_side: PositionSide,
+        side: OrderSide,
+        reason: str,
+        source: DecisionSource,
+    ) -> None:
         order = Order(
             strategy_name=strategy_name,
             symbol=symbol,
+            instrument_type=instrument_type,
+            margin_mode=margin_mode,
+            position_side=position_side,
+            source=source,
             side=side,
             order_type=OrderType.MARKET,
             status=OrderStatus.REJECTED,
             mode=self.settings.trading_mode,
             quantity=0.0,
-            exchange_name=self.settings.exchange_name,
+            filled_quantity=0.0,
+            remaining_quantity=0.0,
+            leverage=1.0,
+            exchange_name=self._exchange_name(instrument_type),
             notes=reason,
         )
         self.db.add(order)
@@ -92,121 +188,322 @@ class ExecutionService:
             "WARNING",
             "risk_rejection",
             reason,
-            {"strategy_name": strategy_name, "symbol": symbol},
+            {"strategy_name": strategy_name, "symbol": symbol, "instrument_type": instrument_type.value},
         )
         self.db.commit()
+
+    def _position_stop_price(self, side: PositionSide, entry_price: float, stop_loss_pct: float) -> float:
+        if side == PositionSide.SHORT:
+            return entry_price * (1 + stop_loss_pct)
+        return entry_price * (1 - stop_loss_pct)
+
+    def _position_take_profit_price(self, side: PositionSide, entry_price: float, take_profit_pct: float) -> float:
+        if side == PositionSide.SHORT:
+            return entry_price * (1 - take_profit_pct)
+        return entry_price * (1 + take_profit_pct)
+
+    def _entry_cash_flow(
+        self,
+        *,
+        instrument_type: InstrumentType,
+        position_side: PositionSide,
+        notional: float,
+        fee_paid: float,
+        collateral: float,
+    ) -> float:
+        if instrument_type == InstrumentType.SPOT and position_side == PositionSide.LONG:
+            return -(notional + fee_paid)
+        return -(collateral + fee_paid)
+
+    def _exit_cash_flow(
+        self,
+        *,
+        instrument_type: InstrumentType,
+        position_side: PositionSide,
+        exit_notional: float,
+        gross_pnl: float,
+        fee_paid: float,
+        collateral_release: float,
+        funding_alloc: float,
+    ) -> float:
+        if instrument_type == InstrumentType.SPOT and position_side == PositionSide.LONG:
+            return exit_notional - fee_paid
+        return collateral_release + gross_pnl - fee_paid - funding_alloc
+
+    def _record_entry_fill(
+        self,
+        *,
+        strategy_name: str | None,
+        normalized: NormalizedOrder,
+        order: Order,
+        report: ExecutionReport,
+        position_side: PositionSide,
+        stop_loss_pct: float,
+        take_profit_pct: float,
+        decision_source: DecisionSource,
+    ) -> Position:
+        if report.fill_price is None or report.filled_quantity <= 0:
+            raise TradingError("Cannot create a position from an unfilled order.")
+
+        entry_notional = report.fill_price * report.filled_quantity
+        collateral = (
+            entry_notional / max(normalized.leverage, 1.0)
+            if normalized.instrument.instrument_type == InstrumentType.PERPETUAL
+            else 0.0
+        )
+        liquidation_price = (
+            self.instrument_service.estimate_liquidation_price(
+                entry_price=report.fill_price,
+                position_side=position_side,
+                leverage=normalized.leverage,
+                maintenance_margin_rate=normalized.instrument.maintenance_margin_rate,
+            )
+            if normalized.instrument.instrument_type == InstrumentType.PERPETUAL
+            else None
+        )
+        position = Position(
+            strategy_name=strategy_name or "manual",
+            symbol=order.symbol,
+            instrument_type=normalized.instrument.instrument_type,
+            margin_mode=order.margin_mode,
+            side=position_side,
+            mode=self.settings.trading_mode,
+            status=PositionStatus.OPEN,
+            quantity=report.filled_quantity,
+            leverage=normalized.leverage,
+            avg_entry_price=report.fill_price,
+            current_price=report.fill_price,
+            entry_notional=entry_notional,
+            collateral=collateral,
+            unrealized_pnl=0.0,
+            realized_pnl=0.0,
+            stop_loss_price=self._position_stop_price(position_side, report.fill_price, stop_loss_pct),
+            take_profit_price=self._position_take_profit_price(position_side, report.fill_price, take_profit_pct),
+            liquidation_price=liquidation_price,
+            maintenance_margin_rate=normalized.instrument.maintenance_margin_rate,
+            funding_cost=0.0,
+        )
+        self.db.add(position)
+        self.db.flush()
+        order.liquidation_price = liquidation_price
+        entry_side = _entry_side(position_side)
+        self.db.add(
+            Trade(
+                order_id=order.id,
+                position_id=position.id,
+                strategy_name=strategy_name,
+                symbol=order.symbol,
+                instrument_type=normalized.instrument.instrument_type,
+                margin_mode=order.margin_mode,
+                position_side=position_side,
+                source=decision_source,
+                side=entry_side,
+                action=TradeAction.ENTRY,
+                mode=self.settings.trading_mode,
+                leverage=normalized.leverage,
+                price=report.fill_price,
+                quantity=report.filled_quantity,
+                notional=entry_notional,
+                fee_paid=report.fee_paid,
+                funding_cost=0.0,
+                realized_pnl=0.0,
+                cash_flow=self._entry_cash_flow(
+                    instrument_type=normalized.instrument.instrument_type,
+                    position_side=position_side,
+                    notional=entry_notional,
+                    fee_paid=report.fee_paid,
+                    collateral=collateral,
+                ),
+                notes="entry_fill",
+            )
+        )
+        return position
 
     def submit_entry_order(
         self,
         *,
-        strategy_name: str,
+        strategy_name: str | None,
         symbol: str,
         reference_price: float,
         order_type: OrderType = OrderType.MARKET,
         limit_price: float | None = None,
-        spread_bps: float = 0.0,
+        instrument_type: InstrumentType = InstrumentType.SPOT,
+        margin_mode: MarginMode | None = None,
+        leverage: float | None = None,
+        position_side: PositionSide = PositionSide.LONG,
+        decision_source: DecisionSource = DecisionSource.STRATEGY,
+        quantity: float | None = None,
+        stop_loss_pct: float | None = None,
+        take_profit_pct: float | None = None,
+        spread_bps: float | None = None,
         slippage_bps: float | None = None,
+        depth_snapshot: dict[str, list[list[float]]] | None = None,
+        execution_model: str | None = None,
+        allow_candle_fallback: bool = True,
     ) -> Order:
-        existing_position = (
-            self.db.query(Position)
-            .filter(
-                Position.mode == self.settings.trading_mode,
-                Position.strategy_name == strategy_name,
-                Position.symbol == symbol,
-                Position.status == PositionStatus.OPEN,
-            )
-            .one_or_none()
+        selected_margin_mode = (
+            margin_mode
+            if margin_mode is not None
+            else (MarginMode.ISOLATED if instrument_type == InstrumentType.PERPETUAL else MarginMode.CASH)
+        )
+        selected_leverage = 1.0 if instrument_type == InstrumentType.SPOT else float(leverage or self.settings.default_leverage)
+        execution_model = execution_model or self.settings.default_execution_model
+        existing_position = self.portfolio_service.get_position(
+            strategy_name=strategy_name or "manual",
+            symbol=symbol,
+            instrument_type=instrument_type,
         )
         if existing_position is not None:
-            raise TradingError(f"Open position already exists for {strategy_name} on {symbol}.")
+            raise TradingError(f"Open position already exists for {strategy_name or 'manual'} on {symbol}.")
 
-        strategy = self.registry.create_strategy(strategy_name, db=self.db)
-        state = self.portfolio_service.recalculate_state({symbol: reference_price})
-        quantity = strategy.position_size(
-            cash_balance=state.cash_balance,
-            price=reference_price,
-            risk_fraction=self.settings.max_risk_per_trade,
-            max_notional_fraction=self.settings.max_position_notional_pct,
+        strategy = None
+        if strategy_name and strategy_name in self.registry.names():
+            strategy = self.registry.create_strategy(strategy_name, db=self.db)
+
+        portfolio = self.portfolio_service.recalculate_state({symbol: reference_price})
+        stop_loss_pct = stop_loss_pct if stop_loss_pct is not None else (strategy.stop_loss_pct() if strategy else 0.015)
+        take_profit_pct = (
+            take_profit_pct if take_profit_pct is not None else (strategy.take_profit_pct() if strategy else 0.03)
         )
+
+        if quantity is None:
+            if strategy is not None:
+                quantity = strategy.position_size(
+                    cash_balance=portfolio.last_equity,
+                    price=reference_price,
+                    risk_fraction=self.settings.max_risk_per_trade,
+                    max_notional_fraction=self.settings.max_position_notional_pct,
+                    leverage=selected_leverage,
+                )
+            else:
+                quantity = round(
+                    max(
+                        (portfolio.last_equity * self.settings.max_position_notional_pct * max(selected_leverage, 1.0))
+                        / max(reference_price, 1.0),
+                        0.0,
+                    ),
+                    8,
+                )
         if quantity <= 0:
             raise RiskCheckFailed("Calculated order quantity is zero.")
 
+        normalized = self.instrument_service.normalize_order(
+            symbol=symbol,
+            instrument_type=instrument_type,
+            quantity=quantity,
+            limit_price=limit_price,
+            reference_price=reference_price,
+            leverage=selected_leverage,
+        )
+        funding_record = (
+            self.market_depth_service.latest_funding_rate(symbol)
+            if instrument_type == InstrumentType.PERPETUAL
+            else None
+        )
+        liquidation_price = (
+            self.instrument_service.estimate_liquidation_price(
+                entry_price=normalized.limit_price or reference_price,
+                position_side=position_side,
+                leverage=normalized.leverage,
+                maintenance_margin_rate=normalized.instrument.maintenance_margin_rate,
+            )
+            if instrument_type == InstrumentType.PERPETUAL
+            else None
+        )
+        spread_bps = (
+            float(spread_bps)
+            if spread_bps is not None
+            else self._derive_spread_bps(symbol, instrument_type, fallback=0.0)
+        )
+        slippage_bps = (
+            float(slippage_bps)
+            if slippage_bps is not None
+            else self.settings.default_slippage_bps
+        )
         risk = self.risk_service.evaluate_entry(
             symbol=symbol,
-            quantity=quantity,
-            price=reference_price,
-            stop_loss_pct=strategy.stop_loss_pct(),
+            quantity=normalized.quantity,
+            price=normalized.limit_price or reference_price,
+            stop_loss_pct=stop_loss_pct,
+            instrument_type=instrument_type,
+            leverage=normalized.leverage,
+            position_side=position_side,
             spread_bps=spread_bps,
-            slippage_bps=slippage_bps if slippage_bps is not None else self.settings.default_slippage_bps,
+            slippage_bps=slippage_bps,
+            funding_rate=funding_record.funding_rate if funding_record else None,
+            liquidation_price=liquidation_price,
         )
+        entry_side = _entry_side(position_side)
         if not risk.allowed:
-            self._reject_order(strategy_name, symbol, OrderSide.BUY, risk.reason)
-            raise RiskCheckFailed(risk.reason)
-
-        exchange = self._exchange()
-        if order_type == OrderType.MARKET:
-            report = exchange.place_market_order(
-                symbol=symbol,
-                side=OrderSide.BUY,
-                quantity=quantity,
-                reference_price=reference_price,
-            )
-        else:
-            if limit_price is None:
-                raise TradingError("Limit price is required for limit orders.")
-            report = exchange.place_limit_order(
-                symbol=symbol,
-                side=OrderSide.BUY,
-                quantity=quantity,
-                limit_price=limit_price,
-                reference_price=reference_price,
-            )
-
-        order = self._persist_order(strategy_name=strategy_name, symbol=symbol, report=report)
-        order.quantity = quantity
-        if order_type == OrderType.LIMIT:
-            order.limit_price = limit_price
-
-        if report.status == OrderStatus.FILLED and report.fill_price is not None:
-            position = Position(
+            self._reject_order(
                 strategy_name=strategy_name,
                 symbol=symbol,
-                side=PositionSide.LONG,
-                mode=self.settings.trading_mode,
-                status=PositionStatus.OPEN,
-                quantity=report.filled_quantity,
-                avg_entry_price=report.fill_price,
-                current_price=report.fill_price,
-                unrealized_pnl=0.0,
-                realized_pnl=0.0,
-                stop_loss_price=report.fill_price * (1 - strategy.stop_loss_pct()),
-                take_profit_price=report.fill_price * (1 + strategy.take_profit_pct()),
+                instrument_type=instrument_type,
+                margin_mode=selected_margin_mode,
+                position_side=position_side,
+                side=entry_side,
+                reason=risk.reason,
+                source=decision_source,
             )
-            self.db.add(position)
-            self.db.flush()
-            self.db.add(
-                Trade(
-                    order_id=order.id,
-                    position_id=position.id,
-                    strategy_name=strategy_name,
-                    symbol=symbol,
-                    side=OrderSide.BUY,
-                    action=TradeAction.ENTRY,
-                    mode=self.settings.trading_mode,
-                    price=report.fill_price,
-                    quantity=report.filled_quantity,
-                    notional=report.fill_price * report.filled_quantity,
-                    fee_paid=report.fee_paid,
-                    realized_pnl=0.0,
-                    notes="entry_fill",
-                )
+            raise RiskCheckFailed(risk.reason)
+
+        request = OrderRequest(
+            symbol=symbol,
+            exchange_symbol=normalized.instrument.exchange_symbol,
+            instrument_type=instrument_type,
+            margin_mode=selected_margin_mode,
+            position_side=position_side,
+            side=entry_side,
+            order_type=order_type,
+            quantity=normalized.quantity,
+            reference_price=reference_price,
+            limit_price=normalized.limit_price,
+            leverage=normalized.leverage,
+            reduce_only=False,
+            post_only=order_type == OrderType.LIMIT and execution_model == "depth",
+            decision_source=decision_source,
+            tick_size=normalized.instrument.tick_size,
+            lot_size=normalized.instrument.lot_size,
+            min_notional=normalized.instrument.min_notional,
+            depth_snapshot=self._build_depth_snapshot(
+                symbol=symbol,
+                instrument_type=instrument_type,
+                supplied_snapshot=depth_snapshot,
+            ),
+            execution_model=execution_model,
+            allow_candle_fallback=allow_candle_fallback,
+        )
+        report = self._exchange(instrument_type).place_order(request)
+        order = self._persist_order(
+            strategy_name=strategy_name,
+            request=request,
+            normalized=normalized,
+            report=report,
+        )
+
+        if report.filled_quantity > 0 and report.fill_price is not None:
+            position = self._record_entry_fill(
+                strategy_name=strategy_name,
+                normalized=normalized,
+                order=order,
+                report=report,
+                position_side=position_side,
+                stop_loss_pct=stop_loss_pct,
+                take_profit_pct=take_profit_pct,
+                decision_source=decision_source,
             )
             record_event(
                 self.db,
                 "INFO",
                 "order_filled",
-                f"Opened {strategy_name} position on {symbol}.",
-                {"order_id": order.id, "symbol": symbol, "strategy_name": strategy_name},
+                f"Opened {position.side.value.lower()} {symbol} position.",
+                {
+                    "order_id": order.id,
+                    "position_id": position.id,
+                    "strategy_name": strategy_name,
+                    "symbol": symbol,
+                    "instrument_type": instrument_type.value,
+                },
             )
         else:
             record_event(
@@ -214,28 +511,71 @@ class ExecutionService:
                 "INFO",
                 "order_open",
                 f"Submitted resting order for {symbol}.",
-                {"order_id": order.id, "symbol": symbol, "strategy_name": strategy_name},
+                {"order_id": order.id, "strategy_name": strategy_name, "symbol": symbol},
             )
         self.db.commit()
         self.portfolio_service.recalculate_state({symbol: report.fill_price or reference_price})
         self.db.refresh(order)
         return order
 
-    def close_position(self, position: Position, reference_price: float, exit_reason: str) -> Order:
+    def close_position(
+        self,
+        position: Position,
+        reference_price: float,
+        exit_reason: str,
+        *,
+        order_type: OrderType = OrderType.MARKET,
+        limit_price: float | None = None,
+        depth_snapshot: dict[str, list[list[float]]] | None = None,
+        execution_model: str | None = None,
+        allow_candle_fallback: bool = True,
+    ) -> Order:
         if position.status != PositionStatus.OPEN:
             raise TradingError(f"Position {position.id} is not open.")
 
-        exchange = self._exchange()
-        report = exchange.place_market_order(
+        normalized = self.instrument_service.normalize_order(
             symbol=position.symbol,
-            side=OrderSide.SELL,
+            instrument_type=position.instrument_type,
             quantity=position.quantity,
+            limit_price=limit_price,
             reference_price=reference_price,
+            leverage=position.leverage,
         )
-        order = self._persist_order(strategy_name=position.strategy_name, symbol=position.symbol, report=report)
-        order.quantity = position.quantity
+        request = OrderRequest(
+            symbol=position.symbol,
+            exchange_symbol=normalized.instrument.exchange_symbol,
+            instrument_type=position.instrument_type,
+            margin_mode=position.margin_mode,
+            position_side=position.side,
+            side=_exit_side(position.side),
+            order_type=order_type,
+            quantity=normalized.quantity,
+            reference_price=reference_price,
+            limit_price=normalized.limit_price,
+            leverage=position.leverage,
+            reduce_only=True,
+            post_only=False,
+            decision_source=DecisionSource.RISK if exit_reason in {"stop_loss", "liquidation"} else DecisionSource.STRATEGY,
+            tick_size=normalized.instrument.tick_size,
+            lot_size=normalized.instrument.lot_size,
+            min_notional=normalized.instrument.min_notional,
+            depth_snapshot=self._build_depth_snapshot(
+                symbol=position.symbol,
+                instrument_type=position.instrument_type,
+                supplied_snapshot=depth_snapshot,
+            ),
+            execution_model=execution_model or self.settings.default_execution_model,
+            allow_candle_fallback=allow_candle_fallback,
+        )
+        report = self._exchange(position.instrument_type).place_order(request)
+        order = self._persist_order(
+            strategy_name=position.strategy_name,
+            request=request,
+            normalized=normalized,
+            report=report,
+        )
 
-        if report.status != OrderStatus.FILLED or report.fill_price is None:
+        if report.filled_quantity <= 0 or report.fill_price is None:
             record_event(
                 self.db,
                 "WARNING",
@@ -244,22 +584,37 @@ class ExecutionService:
                 {"position_id": position.id, "order_id": order.id},
             )
             self.db.commit()
+            self.db.refresh(order)
             return order
 
-        entry_fees = sum(
-            trade.fee_paid
-            for trade in position.trades
-            if trade.action == TradeAction.ENTRY
-        )
-        gross_pnl = (report.fill_price - position.avg_entry_price) * position.quantity
-        net_pnl = gross_pnl - entry_fees - report.fee_paid
+        original_quantity = position.quantity
+        close_quantity = min(report.filled_quantity, original_quantity)
+        remaining_quantity = max(original_quantity - close_quantity, 0.0)
+        direction = _direction(position.side)
+        gross_pnl = direction * (report.fill_price - position.avg_entry_price) * close_quantity
+        entry_fee_total = sum(trade.fee_paid for trade in position.trades if trade.action == TradeAction.ENTRY)
+        entry_fee_alloc = entry_fee_total * (close_quantity / original_quantity) if original_quantity else 0.0
+        funding_alloc = position.funding_cost * (close_quantity / original_quantity) if original_quantity else 0.0
+        collateral_release = position.collateral * (close_quantity / original_quantity) if original_quantity else 0.0
+        realized_pnl = gross_pnl - entry_fee_alloc - report.fee_paid - funding_alloc
+        exit_notional = report.fill_price * close_quantity
 
+        position.quantity = remaining_quantity
         position.current_price = report.fill_price
-        position.unrealized_pnl = 0.0
-        position.realized_pnl = net_pnl
-        position.status = PositionStatus.CLOSED
-        position.exit_reason = exit_reason
-        position.closed_at = datetime.now(timezone.utc)
+        position.realized_pnl += realized_pnl
+        position.entry_notional = position.avg_entry_price * remaining_quantity
+        position.collateral = max(position.collateral - collateral_release, 0.0)
+        position.funding_cost = max(position.funding_cost - funding_alloc, 0.0)
+
+        if remaining_quantity <= 1e-12:
+            position.status = PositionStatus.CLOSED
+            position.unrealized_pnl = 0.0
+            position.exit_reason = exit_reason
+            position.closed_at = datetime.now(timezone.utc)
+            position.quantity = 0.0
+        else:
+            position.unrealized_pnl = direction * (position.current_price - position.avg_entry_price) * remaining_quantity
+
         self.db.add(position)
         self.db.add(
             Trade(
@@ -267,34 +622,64 @@ class ExecutionService:
                 position_id=position.id,
                 strategy_name=position.strategy_name,
                 symbol=position.symbol,
-                side=OrderSide.SELL,
+                instrument_type=position.instrument_type,
+                margin_mode=position.margin_mode,
+                position_side=position.side,
+                source=request.decision_source,
+                side=request.side,
                 action=TradeAction.EXIT,
                 mode=self.settings.trading_mode,
+                leverage=position.leverage,
                 price=report.fill_price,
-                quantity=position.quantity,
-                notional=report.fill_price * position.quantity,
+                quantity=close_quantity,
+                notional=exit_notional,
                 fee_paid=report.fee_paid,
-                realized_pnl=net_pnl,
+                funding_cost=funding_alloc,
+                realized_pnl=realized_pnl,
+                cash_flow=self._exit_cash_flow(
+                    instrument_type=position.instrument_type,
+                    position_side=position.side,
+                    exit_notional=exit_notional,
+                    gross_pnl=gross_pnl,
+                    fee_paid=report.fee_paid,
+                    collateral_release=collateral_release,
+                    funding_alloc=funding_alloc,
+                ),
                 notes=exit_reason,
             )
         )
         record_event(
             self.db,
             "INFO",
-            "position_closed",
-            f"Closed position {position.id} on {position.symbol}.",
-            {"position_id": position.id, "order_id": order.id, "exit_reason": exit_reason},
+            "position_closed" if position.status == PositionStatus.CLOSED else "position_reduced",
+            f"Processed exit for position {position.id} on {position.symbol}.",
+            {
+                "position_id": position.id,
+                "order_id": order.id,
+                "exit_reason": exit_reason,
+                "remaining_quantity": remaining_quantity,
+            },
         )
         self.db.commit()
         self.portfolio_service.recalculate_state({position.symbol: report.fill_price})
         self.db.refresh(order)
         return order
 
+    def close_position_by_id(self, position_id: int, reference_price: float | None = None, reason: str = "manual_exit") -> Order:
+        position = self.db.query(Position).filter(Position.id == position_id).one_or_none()
+        if position is None:
+            raise TradingError(f"Unknown position id {position_id}.")
+        return self.close_position(
+            position=position,
+            reference_price=reference_price or position.current_price or position.avg_entry_price,
+            exit_reason=reason,
+        )
+
     def cancel_order(self, order_id: int) -> Order:
         order = self.db.query(Order).filter(Order.id == order_id).one()
-        if order.status != OrderStatus.NEW:
+        if order.status not in {OrderStatus.NEW, OrderStatus.PARTIALLY_FILLED}:
             raise TradingError(f"Order {order_id} is not cancelable.")
-        canceled = self._exchange().cancel_order(order.client_order_id)
+        canceled = self._exchange(order.instrument_type).cancel_order(order.exchange_order_id or order.client_order_id)
         if not canceled:
             raise TradingError(f"Adapter could not cancel order {order_id}.")
         order.status = OrderStatus.CANCELED
@@ -317,48 +702,103 @@ class ExecutionService:
         symbol: str,
         timeframe: str,
         limit: int = 300,
+        instrument_type: InstrumentType | None = None,
+        execution_model: str | None = None,
     ) -> dict[str, object]:
+        instrument_type = instrument_type or (
+            InstrumentType.PERPETUAL if self.settings.enable_derivatives else InstrumentType.SPOT
+        )
         strategy = self.registry.create_strategy(strategy_name, db=self.db)
-        frame = self.data_service.get_historical_data(symbol=symbol, timeframe=timeframe, limit=limit)
+        frame = self.data_service.get_historical_data(
+            symbol=symbol,
+            timeframe=timeframe,
+            limit=limit,
+            instrument_type=instrument_type,
+        )
         if frame.empty:
             return {"action": "no_data", "strategy_name": strategy_name, "symbol": symbol}
         signal_frame = strategy.generate_signals(frame)
         latest = signal_frame.iloc[-1]
         latest_price = float(latest["close"])
-        open_position = (
-            self.db.query(Position)
-            .filter(
-                Position.mode == self.settings.trading_mode,
-                Position.strategy_name == strategy_name,
-                Position.symbol == symbol,
-                Position.status == PositionStatus.OPEN,
-            )
-            .one_or_none()
+        open_position = self.portfolio_service.get_position(
+            strategy_name=strategy_name,
+            symbol=symbol,
+            instrument_type=instrument_type,
         )
 
         if open_position is not None:
-            open_position.current_price = latest_price
-            open_position.unrealized_pnl = (latest_price - open_position.avg_entry_price) * open_position.quantity
-            self.db.add(open_position)
-            self.db.commit()
-            if open_position.stop_loss_price and float(latest["low"]) <= open_position.stop_loss_price:
-                self.close_position(open_position, open_position.stop_loss_price, "stop_loss")
-                return {"action": "exit", "reason": "stop_loss", "strategy_name": strategy_name}
-            if open_position.take_profit_price and float(latest["high"]) >= open_position.take_profit_price:
-                self.close_position(open_position, open_position.take_profit_price, "take_profit")
-                return {"action": "exit", "reason": "take_profit", "strategy_name": strategy_name}
-            if strategy.should_exit(latest, has_position=True):
+            self.portfolio_service.recalculate_state({symbol: latest_price})
+            if open_position.liquidation_price:
+                if open_position.side == PositionSide.LONG and float(latest["low"]) <= open_position.liquidation_price:
+                    self.close_position(open_position, open_position.liquidation_price, "liquidation")
+                    return {"action": "exit", "reason": "liquidation", "strategy_name": strategy_name}
+                if open_position.side == PositionSide.SHORT and float(latest["high"]) >= open_position.liquidation_price:
+                    self.close_position(open_position, open_position.liquidation_price, "liquidation")
+                    return {"action": "exit", "reason": "liquidation", "strategy_name": strategy_name}
+            if open_position.stop_loss_price:
+                if open_position.side == PositionSide.LONG and float(latest["low"]) <= open_position.stop_loss_price:
+                    self.close_position(open_position, open_position.stop_loss_price, "stop_loss")
+                    return {"action": "exit", "reason": "stop_loss", "strategy_name": strategy_name}
+                if open_position.side == PositionSide.SHORT and float(latest["high"]) >= open_position.stop_loss_price:
+                    self.close_position(open_position, open_position.stop_loss_price, "stop_loss")
+                    return {"action": "exit", "reason": "stop_loss", "strategy_name": strategy_name}
+            if open_position.take_profit_price:
+                if open_position.side == PositionSide.LONG and float(latest["high"]) >= open_position.take_profit_price:
+                    self.close_position(open_position, open_position.take_profit_price, "take_profit")
+                    return {"action": "exit", "reason": "take_profit", "strategy_name": strategy_name}
+                if open_position.side == PositionSide.SHORT and float(latest["low"]) <= open_position.take_profit_price:
+                    self.close_position(open_position, open_position.take_profit_price, "take_profit")
+                    return {"action": "exit", "reason": "take_profit", "strategy_name": strategy_name}
+            signal_side = strategy.desired_position_side(latest)
+            opposite_signal = bool(latest.get("entry", False)) and signal_side != open_position.side
+            if strategy.should_exit(latest, has_position=True) or opposite_signal:
                 self.close_position(open_position, latest_price, "strategy_exit")
                 return {"action": "exit", "reason": "strategy_exit", "strategy_name": strategy_name}
-            self.portfolio_service.recalculate_state({symbol: latest_price})
             return {"action": "hold", "strategy_name": strategy_name, "symbol": symbol}
 
         if strategy.should_enter(latest, has_position=False):
+            signal_side = strategy.desired_position_side(latest)
+            if instrument_type == InstrumentType.SPOT and signal_side == PositionSide.SHORT:
+                return {"action": "flat", "reason": "spot_short_disabled", "strategy_name": strategy_name}
             order = self.submit_entry_order(
                 strategy_name=strategy_name,
                 symbol=symbol,
                 reference_price=latest_price,
+                instrument_type=instrument_type,
+                margin_mode=MarginMode.ISOLATED if instrument_type == InstrumentType.PERPETUAL else MarginMode.CASH,
+                leverage=self.settings.default_leverage if instrument_type == InstrumentType.PERPETUAL else 1.0,
+                position_side=signal_side,
+                decision_source=DecisionSource.STRATEGY,
+                stop_loss_pct=strategy.stop_loss_pct(),
+                take_profit_pct=strategy.take_profit_pct(),
+                execution_model=execution_model or self.settings.default_execution_model,
             )
-            return {"action": "entry", "order_id": order.id, "strategy_name": strategy_name}
+            return {"action": "entry", "order_id": order.id, "strategy_name": strategy_name, "side": signal_side.value}
 
         return {"action": "flat", "strategy_name": strategy_name, "symbol": symbol}
+
+    def manual_order(
+        self,
+        *,
+        symbol: str,
+        instrument_type: InstrumentType,
+        position_side: PositionSide,
+        quantity: float,
+        reference_price: float,
+        order_type: OrderType = OrderType.MARKET,
+        limit_price: float | None = None,
+        leverage: float | None = None,
+    ) -> Order:
+        return self.submit_entry_order(
+            strategy_name="manual",
+            symbol=symbol,
+            reference_price=reference_price,
+            order_type=order_type,
+            limit_price=limit_price,
+            instrument_type=instrument_type,
+            margin_mode=MarginMode.ISOLATED if instrument_type == InstrumentType.PERPETUAL else MarginMode.CASH,
+            leverage=leverage,
+            position_side=position_side,
+            decision_source=DecisionSource.MANUAL,
+            quantity=quantity,
+        )

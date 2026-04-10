@@ -3,9 +3,10 @@ from __future__ import annotations
 from typing import Any
 from uuid import uuid4
 
-from app.core.enums import OrderSide, OrderStatus, OrderType
-from app.exchanges.base import ExchangeAdapter, ExecutionReport
+from app.core.enums import InstrumentType, MarginMode, OrderSide, OrderStatus, OrderType
+from app.exchanges.base import ExchangeAdapter, ExecutionReport, OrderRequest
 from app.utils.fees import apply_slippage, calculate_fee
+from app.utils.orderbook import simulate_limit_fill, simulate_market_fill
 
 
 class PaperExchange(ExchangeAdapter):
@@ -17,68 +18,140 @@ class PaperExchange(ExchangeAdapter):
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 500) -> list[list[float]]:
         raise NotImplementedError("Paper exchange does not fetch market data directly.")
 
-    def place_market_order(
-        self, symbol: str, side: OrderSide, quantity: float, reference_price: float
+    def _build_report(
+        self,
+        request: OrderRequest,
+        *,
+        status: OrderStatus,
+        filled_quantity: float,
+        remaining_quantity: float,
+        fill_price: float | None,
+        fee_paid: float,
+        slippage_bps: float,
+        notes: str,
     ) -> ExecutionReport:
         client_order_id = str(uuid4())
-        fill_price = apply_slippage(reference_price, side=side, slippage_bps=self.slippage_bps)
-        notional = fill_price * quantity
-        fee_paid = calculate_fee(notional, self.fee_bps)
         return ExecutionReport(
             client_order_id=client_order_id,
-            status=OrderStatus.FILLED,
-            side=side,
-            order_type=OrderType.MARKET,
-            filled_quantity=quantity,
+            status=status,
+            side=request.side,
+            order_type=request.order_type,
+            requested_quantity=request.quantity,
+            filled_quantity=filled_quantity,
+            remaining_quantity=remaining_quantity,
             fill_price=fill_price,
             fee_paid=fee_paid,
-            slippage_bps=self.slippage_bps,
-            notes=f"Paper-filled {symbol} market order.",
+            slippage_bps=slippage_bps,
+            notes=notes,
         )
 
-    def place_limit_order(
-        self,
-        symbol: str,
-        side: OrderSide,
-        quantity: float,
-        limit_price: float,
-        reference_price: float,
-    ) -> ExecutionReport:
-        client_order_id = str(uuid4())
-        crosses_market = (side == OrderSide.BUY and limit_price >= reference_price) or (
-            side == OrderSide.SELL and limit_price <= reference_price
-        )
-        if crosses_market:
-            notional = limit_price * quantity
-            fee_paid = calculate_fee(notional, self.fee_bps)
-            return ExecutionReport(
-                client_order_id=client_order_id,
-                status=OrderStatus.FILLED,
-                side=side,
-                order_type=OrderType.LIMIT,
-                filled_quantity=quantity,
-                fill_price=limit_price,
-                fee_paid=fee_paid,
+    def place_order(self, request: OrderRequest) -> ExecutionReport:
+        if request.execution_model == "depth" and request.depth_snapshot is None and not request.allow_candle_fallback:
+            return self._build_report(
+                request,
+                status=OrderStatus.REJECTED,
+                filled_quantity=0.0,
+                remaining_quantity=request.quantity,
+                fill_price=None,
+                fee_paid=0.0,
                 slippage_bps=0.0,
-                notes=f"Paper-filled {symbol} limit order immediately.",
+                notes="Depth execution requested without an order-book snapshot.",
             )
-        self._open_orders[client_order_id] = {
-            "symbol": symbol,
-            "side": side.value,
-            "quantity": quantity,
-            "limit_price": limit_price,
-            "status": OrderStatus.NEW.value,
-        }
-        return ExecutionReport(
-            client_order_id=client_order_id,
-            status=OrderStatus.NEW,
-            side=side,
-            order_type=OrderType.LIMIT,
-            filled_quantity=0.0,
-            fill_price=None,
-            fee_paid=0.0,
-            slippage_bps=0.0,
-            notes=f"Paper-submitted resting {symbol} limit order.",
+
+        if request.depth_snapshot:
+            bids = request.depth_snapshot.get("bids", [])
+            asks = request.depth_snapshot.get("asks", [])
+            if request.order_type == OrderType.MARKET:
+                fill = simulate_market_fill(request.side, request.quantity, bids, asks)
+            else:
+                fill = simulate_limit_fill(
+                    request.side,
+                    request.quantity,
+                    request.limit_price or request.reference_price,
+                    bids,
+                    asks,
+                )
+            if fill.status in {OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED}:
+                fee_paid = calculate_fee(fill.notional, self.fee_bps)
+                report = self._build_report(
+                    request,
+                    status=fill.status,
+                    filled_quantity=fill.filled_quantity,
+                    remaining_quantity=fill.remaining_quantity,
+                    fill_price=fill.average_price,
+                    fee_paid=fee_paid,
+                    slippage_bps=0.0,
+                    notes=f"Paper {request.instrument_type.value} order filled from depth.",
+                )
+                if fill.remaining_quantity > 0 and request.order_type == OrderType.LIMIT:
+                    self._open_orders[report.client_order_id] = {
+                        "symbol": request.symbol,
+                        "side": request.side.value,
+                        "quantity": fill.remaining_quantity,
+                        "limit_price": request.limit_price,
+                        "status": OrderStatus.NEW.value,
+                    }
+                return report
+            if request.order_type == OrderType.LIMIT:
+                report = self._build_report(
+                    request,
+                    status=OrderStatus.NEW,
+                    filled_quantity=0.0,
+                    remaining_quantity=request.quantity,
+                    fill_price=None,
+                    fee_paid=0.0,
+                    slippage_bps=0.0,
+                    notes=f"Paper-submitted resting {request.symbol} limit order.",
+                )
+                self._open_orders[report.client_order_id] = {
+                    "symbol": request.symbol,
+                    "side": request.side.value,
+                    "quantity": request.quantity,
+                    "limit_price": request.limit_price,
+                    "status": OrderStatus.NEW.value,
+                }
+                return report
+
+        fill_price = apply_slippage(
+            request.limit_price if request.order_type == OrderType.LIMIT and request.limit_price else request.reference_price,
+            side=request.side,
+            slippage_bps=self.slippage_bps if request.order_type == OrderType.MARKET else 0.0,
+        )
+        notional = fill_price * request.quantity if fill_price is not None else 0.0
+        fee_paid = calculate_fee(notional, self.fee_bps) if fill_price is not None else 0.0
+        if request.order_type == OrderType.LIMIT and request.limit_price is not None:
+            crosses_market = (request.side == OrderSide.BUY and request.limit_price >= request.reference_price) or (
+                request.side == OrderSide.SELL and request.limit_price <= request.reference_price
+            )
+            if not crosses_market:
+                report = self._build_report(
+                    request,
+                    status=OrderStatus.NEW,
+                    filled_quantity=0.0,
+                    remaining_quantity=request.quantity,
+                    fill_price=None,
+                    fee_paid=0.0,
+                    slippage_bps=0.0,
+                    notes=f"Paper-submitted resting {request.symbol} limit order.",
+                )
+                self._open_orders[report.client_order_id] = {
+                    "symbol": request.symbol,
+                    "side": request.side.value,
+                    "quantity": request.quantity,
+                    "limit_price": request.limit_price,
+                    "status": OrderStatus.NEW.value,
+                }
+                return report
+
+        return self._build_report(
+            request,
+            status=OrderStatus.FILLED,
+            filled_quantity=request.quantity,
+            remaining_quantity=0.0,
+            fill_price=fill_price,
+            fee_paid=fee_paid,
+            slippage_bps=self.slippage_bps if request.order_type == OrderType.MARKET else 0.0,
+            notes=f"Paper-filled {request.instrument_type.value} {request.order_type.value} order.",
         )
 
     def cancel_order(self, client_order_id: str) -> bool:
