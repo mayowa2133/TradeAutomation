@@ -66,18 +66,19 @@ PROFILES: dict[str, StrategyProfile] = {
         },
     },
     "research-breakout-15m": {
-        "description": "Lower-turnover research preset based on the recent paper-trade loss review.",
+        "description": "Lower-turnover 15-minute breakout research preset tuned to produce a cleaner but usable paper sample.",
         "notes": [
             "This profile is a research hypothesis, not evidence of production alpha.",
-            "It slows the system down, narrows the universe, and favors wider 15-minute breakouts.",
-            "Recent sample analysis suggested the current 1-minute demo profile loses mainly to cost and turnover.",
+            "It stays materially slower than the 1-minute demo profile, but now narrows the universe to the strongest liquid majors for a cleaner sample.",
+            "Recent sample analysis suggested the current 1-minute demo profile loses mainly to cost and turnover, so this profile prioritizes selectivity and candidate ranking over activity.",
         ],
         "runtime_recommendations": {
             "DEFAULT_TIMEFRAMES": "15m",
-            "SYMBOL_ALLOWLIST": "ETH/USDT,SOL/USDT",
+            "SYMBOL_ALLOWLIST": "BTC/USDT,ETH/USDT",
             "MAX_POSITION_NOTIONAL_PCT": 0.08,
             "DEFAULT_LEVERAGE": 1.5,
             "MAX_CONCURRENT_POSITIONS": 2,
+            "MARKET_REFRESH_SECONDS": 180,
         },
         "strategies": {
             "ema_crossover": {
@@ -92,11 +93,12 @@ PROFILES: dict[str, StrategyProfile] = {
             "breakout": {
                 "enabled": True,
                 "parameters": {
-                    "lookback": 30,
-                    "exit_lookback": 30,
-                    "buffer_pct": 0.002,
-                    "stop_loss_pct": 0.02,
-                    "take_profit_pct": 0.06,
+                    "lookback": 24,
+                    "exit_lookback": 18,
+                    "buffer_pct": 0.001,
+                    "min_breakout_strength_pct": 0.001,
+                    "stop_loss_pct": 0.018,
+                    "take_profit_pct": 0.05,
                 },
             },
             "rsi_mean_reversion": {

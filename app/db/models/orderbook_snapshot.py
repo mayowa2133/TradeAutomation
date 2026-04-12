@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, Enum, Float, Integer, String
+from sqlalchemy import JSON, BigInteger, DateTime, Enum, Float, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.enums import InstrumentType
@@ -18,7 +18,7 @@ class OrderBookSnapshot(Base):
     instrument_type: Mapped[InstrumentType] = mapped_column(
         Enum(InstrumentType), default=InstrumentType.SPOT, index=True
     )
-    sequence: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sequence: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     depth: Mapped[int] = mapped_column(Integer, default=50)
     bids: Mapped[list] = mapped_column(JSON, default=list)
     asks: Mapped[list] = mapped_column(JSON, default=list)

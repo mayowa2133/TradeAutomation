@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import ccxt
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.core.enums import InstrumentType, MarginMode, PositionSide
 from app.core.exceptions import TradingError
 from app.db.models.instrument import Instrument
+from app.exchanges.ccxt_client_cache import get_public_client
 from app.utils.precision import enforce_min_notional, round_to_increment
 
 
@@ -85,7 +85,7 @@ class InstrumentService:
         return instrument
 
     def sync_perpetual_instruments(self, symbols: list[str] | None = None) -> list[Instrument]:
-        client = ccxt.bybit({"enableRateLimit": True, "options": {"defaultType": "swap"}})
+        client = get_public_client(self._perp_exchange_name(), default_type="swap")
         markets = client.load_markets()
         allowed = set(symbols or [])
         synced: list[Instrument] = []

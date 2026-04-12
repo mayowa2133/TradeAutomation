@@ -35,13 +35,16 @@ class DashboardService:
             "strategies": self.registry.list_strategies(self.db),
             "stream_status": [
                 {
-                    "stream_name": item.stream_name,
-                    "symbol": item.symbol,
-                    "status": item.status.value,
-                    "last_message_at": item.last_message_at.isoformat() if item.last_message_at else None,
-                    "error_message": item.error_message,
+                    "stream_name": item["stream_name"],
+                    "symbol": item["symbol"],
+                    "status": item["status"],
+                    "last_message_at": item["last_message_at"].isoformat() if item["last_message_at"] else None,
+                    "error_message": item["error_message"],
                 }
-                for item in self.market_depth_service.list_stream_status()
+                for item in self.market_depth_service.stream_status_payloads(
+                    stale_after_seconds=self.settings.stream_stale_after_seconds,
+                    symbols=set(self.settings.symbol_allowlist_list),
+                )
             ],
             "optimizer": latest_optimizer.allocations if latest_optimizer else None,
             "news": [

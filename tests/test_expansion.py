@@ -1,12 +1,26 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from importlib import util as importlib_util
+from pathlib import Path
 
 import pandas as pd
 
-from app.core.enums import InstrumentType, MarginMode, OrderStatus, PositionSide, PositionStatus
+from app.core.enums import (
+    DecisionSource,
+    InstrumentType,
+    MarginMode,
+    OrderStatus,
+    PositionSide,
+    PositionStatus,
+    StreamHealth,
+    TradeAction,
+)
 from app.db.models.instrument import Instrument
+from app.db.models.order import Order
+from app.db.models.portfolio_state import PortfolioState
 from app.db.models.position import Position
+from app.db.models.stream_status import StreamStatus
 from app.db.models.trade import Trade
 from app.schemas.backtest import BacktestResponse
 from app.services.backtest_service import BacktestService
@@ -19,7 +33,10 @@ from app.services.execution_service import ExecutionService
 from app.services.risk_service import RiskService
 from app.services.strategy_registry import StrategyRegistry
 from app.core.exceptions import RiskCheckFailed
+from app.exchanges.ccxt_client_cache import get_public_client
+from app.db.session import get_session_factory
 from app.workers.tasks import evaluate_enabled_strategy
+from app.workers.tasks import rank_entry_candidates
 
 
 def seed_perpetual_instrument(db_session) -> Instrument:
@@ -128,6 +145,32 @@ def test_strategy_instances_are_isolated_by_timeframe(db_session, settings):
     assert second.status == OrderStatus.FILLED
     assert len(positions) == 2
     assert {position.strategy_name for position in positions} == {"ema_crossover@1m", "ema_crossover@5m"}
+
+
+def test_stop_loss_exit_uses_risk_decision_source(db_session, settings):
+    seed_perpetual_instrument(db_session)
+    service = ExecutionService(db=db_session, settings=settings, registry=StrategyRegistry())
+    service.submit_entry_order(
+        strategy_name="breakout",
+        strategy_instance_name="breakout@15m",
+        symbol="BTC/USDT",
+        reference_price=100.0,
+        instrument_type=InstrumentType.PERPETUAL,
+        margin_mode=MarginMode.ISOLATED,
+        leverage=2.0,
+        position_side=PositionSide.LONG,
+        quantity=0.2,
+    )
+    position = service.portfolio_service.get_open_positions()[0]
+    exit_order = service.close_position(position, 98.0, "stop_loss")
+
+    assert exit_order.source == DecisionSource.RISK
+    exit_trade = (
+        db_session.query(Trade)
+        .filter(Trade.order_id == exit_order.id, Trade.action == TradeAction.EXIT)
+        .one()
+    )
+    assert exit_trade.source == DecisionSource.RISK
 
 
 def test_strategy_evaluation_only_acts_once_per_bar(db_session, settings):
@@ -315,6 +358,80 @@ def test_strategy_exit_cooldown_blocks_reentry(db_session, settings):
     assert result["reason"] == "strategy_cooldown_active"
 
 
+def test_rank_entry_candidates_orders_by_confidence_then_symbol():
+    candidates = [
+        {"symbol": "ETH/USDT", "timeframe": "15m", "strategy_name": "breakout", "confidence": 0.4},
+        {"symbol": "BTC/USDT", "timeframe": "15m", "strategy_name": "breakout", "confidence": 0.8},
+        {"symbol": "ADA/USDT", "timeframe": "15m", "strategy_name": "breakout", "confidence": 0.8},
+    ]
+
+    ranked = rank_entry_candidates(candidates)
+
+    assert [candidate["symbol"] for candidate in ranked] == ["ADA/USDT", "BTC/USDT", "ETH/USDT"]
+
+
+def test_public_ccxt_client_is_cached():
+    first = get_public_client("bybit", default_type="swap")
+    second = get_public_client("bybit", default_type="swap")
+
+    assert first is second
+
+
+def test_reset_paper_state_clears_paper_records(db_session, settings):
+    settings.symbol_allowlist = "BTC/USDT,ETH/USDT"
+    seed_perpetual_instrument(db_session)
+    service = ExecutionService(db=db_session, settings=settings, registry=StrategyRegistry())
+    service.manual_order(
+        symbol="BTC/USDT",
+        instrument_type=InstrumentType.PERPETUAL,
+        position_side=PositionSide.LONG,
+        quantity=0.2,
+        reference_price=100.0,
+        leverage=2.0,
+    )
+    depth = MarketDepthService(db=db_session)
+    depth.update_stream_status(
+        stream_name="bybit_public_linear",
+        symbol="BTC/USDT",
+        status=StreamHealth.HEALTHY,
+        touch_message=True,
+    )
+    depth.update_stream_status(
+        stream_name="bybit_public_linear",
+        symbol="ADA/USDT",
+        status=StreamHealth.DEGRADED,
+        touch_message=True,
+    )
+
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "reset_paper_state.py"
+    module_spec = importlib_util.spec_from_file_location("reset_paper_state", script_path)
+    assert module_spec is not None and module_spec.loader is not None
+    module = importlib_util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    summary = module.reset_paper_state(yes=True)
+
+    assert summary["trades_deleted"] >= 1
+    assert summary["orders_deleted"] >= 1
+    assert summary["positions_deleted"] >= 1
+    assert summary["stream_status_deleted"] >= 1
+    with get_session_factory()() as fresh_db:
+        assert fresh_db.query(Order).count() == 0
+        assert fresh_db.query(Position).count() == 0
+        assert fresh_db.query(Trade).count() == 0
+        state = fresh_db.query(PortfolioState).one()
+        assert state.cash_balance == settings.paper_starting_balance
+        assert fresh_db.query(StreamStatus).count() == 1
+        assert fresh_db.query(StreamStatus).one().symbol == "BTC/USDT"
+
+
+def test_research_profile_targets_two_symbols():
+    profile_source = (Path(__file__).resolve().parents[1] / "scripts" / "tune_demo_mode.py").read_text()
+
+    assert '"SYMBOL_ALLOWLIST": "BTC/USDT,ETH/USDT"' in profile_source
+    assert '"MAX_CONCURRENT_POSITIONS": 2' in profile_source
+    assert '"MARKET_REFRESH_SECONDS": 180' in profile_source
+
+
 def test_worker_risk_rejections_do_not_fail_scheduler(db_session, monkeypatch):
     class RaisingExecutionService:
         def __init__(self, *args, **kwargs):
@@ -390,6 +507,67 @@ def test_refresh_historical_data_bypasses_stale_db(db_session, settings):
     assert float(refreshed.iloc[-1]["close"]) == 109.5
 
 
+def test_stream_status_marks_stale_connecting_stream_as_disconnected(db_session):
+    service = MarketDepthService(db=db_session)
+    record = service.update_stream_status(
+        stream_name="bybit_public_linear",
+        symbol="BTC/USDT",
+        status=StreamHealth.CONNECTING,
+    )
+    record.last_heartbeat_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+    record.last_message_at = None
+    db_session.add(record)
+    db_session.commit()
+
+    payload = service.stream_status_payloads(stale_after_seconds=120)[0]
+    assert payload["status"] == StreamHealth.DISCONNECTED.value
+    assert "heartbeat" in str(payload["error_message"]).lower()
+
+
+def test_stream_status_truncates_long_error_messages(db_session):
+    service = MarketDepthService(db=db_session)
+    record = service.update_stream_status(
+        stream_name="bybit_public_linear",
+        symbol="BTC/USDT",
+        status=StreamHealth.DEGRADED,
+        error_message=("line\n" * 400),
+    )
+    assert record.error_message is not None
+    assert len(record.error_message) <= 1000
+    assert "\n" not in record.error_message
+
+
+def test_stream_status_marks_silent_stream_as_degraded(db_session):
+    service = MarketDepthService(db=db_session)
+    record = service.update_stream_status(
+        stream_name="bybit_public_linear",
+        symbol="ETH/USDT",
+        status=StreamHealth.HEALTHY,
+        touch_message=True,
+    )
+    now = datetime.now(timezone.utc)
+    record.last_heartbeat_at = now - timedelta(seconds=30)
+    record.last_message_at = now - timedelta(minutes=5)
+    db_session.add(record)
+    db_session.commit()
+
+    payload = service.stream_status_payloads(stale_after_seconds=120)[0]
+    assert payload["status"] == StreamHealth.DEGRADED.value
+    assert "market-data message" in str(payload["error_message"]).lower()
+
+
+def test_orderbook_snapshot_accepts_large_exchange_sequence(db_session):
+    snapshot = MarketDepthService(db=db_session).persist_orderbook(
+        exchange="bybit",
+        symbol="BTC/USDT",
+        instrument_type=InstrumentType.PERPETUAL,
+        bids=[[100.0, 1.0]],
+        asks=[[100.5, 1.0]],
+        sequence=5_000_000_000,
+    )
+    assert snapshot.sequence == 5_000_000_000
+
+
 def test_news_service_ingests_articles(db_session, settings):
     class StaticProvider:
         def fetch(self, _feed_urls):
@@ -411,6 +589,7 @@ def test_news_service_ingests_articles(db_session, settings):
 
 
 def test_dashboard_and_market_endpoints(client, db_session, settings):
+    settings.symbol_allowlist = "BTC/USDT,ETH/USDT"
     depth = MarketDepthService(db=db_session)
     depth.persist_orderbook(
         exchange=settings.derivatives_exchange_name,
@@ -419,16 +598,38 @@ def test_dashboard_and_market_endpoints(client, db_session, settings):
         bids=[[100.0, 1.0], [99.5, 2.0]],
         asks=[[100.5, 1.2], [101.0, 1.8]],
     )
+    depth.update_stream_status(
+        stream_name="bybit_public_linear",
+        symbol="BTC/USDT",
+        status=StreamHealth.HEALTHY,
+        touch_message=True,
+    )
+    depth.update_stream_status(
+        stream_name="bybit_public_linear",
+        symbol="ETH/USDT",
+        status=StreamHealth.HEALTHY,
+        touch_message=True,
+    )
+    depth.update_stream_status(
+        stream_name="bybit_public_linear",
+        symbol="ADA/USDT",
+        status=StreamHealth.DEGRADED,
+        touch_message=True,
+    )
 
     market_response = client.get(
         "/api/v1/market/depth",
         params={"symbol": "BTC/USDT", "instrument_type": "perpetual"},
     )
+    stream_response = client.get("/api/v1/market/stream-status")
     dashboard_response = client.get("/api/v1/dashboard/summary")
 
     assert market_response.status_code == 200
+    assert stream_response.status_code == 200
     assert dashboard_response.status_code == 200
     assert dashboard_response.json()["portfolio"]["currency"] == "USDT"
+    assert [item["symbol"] for item in stream_response.json()] == ["BTC/USDT", "ETH/USDT"]
+    assert [item["symbol"] for item in dashboard_response.json()["stream_status"]] == ["BTC/USDT", "ETH/USDT"]
 
 
 def test_perpetual_backtest_runs(db_session, settings, synthetic_market_data):

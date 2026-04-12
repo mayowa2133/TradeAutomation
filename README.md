@@ -113,6 +113,8 @@ Perpetual execution:
 - `DERIVATIVES_API_KEY`
 - `DERIVATIVES_API_SECRET`
 - `BYBIT_WS_PUBLIC_URL`
+- `STREAM_MESSAGE_TIMEOUT_SECONDS`
+- `STREAM_STALE_AFTER_SECONDS`
 
 Risk and execution:
 
@@ -255,7 +257,18 @@ Lower-turnover research preset:
 uv run python scripts/tune_demo_mode.py --profile research-breakout-15m
 ```
 
-The `research-breakout-15m` preset is based on recent paper-trade loss review. It is a research hypothesis only, not a profitability claim.
+The `research-breakout-15m` preset is based on recent paper-trade loss review. It narrows the research universe to `BTC/USDT` and `ETH/USDT`, keeps the slower 15-minute cadence, and adds candidate ranking so the strongest signal gets first entry instead of first-come execution. It also requires a minimum breakout-strength threshold and uses side-specific breakout exits so the strategy no longer emits the same-bar entry and generic exit contradiction seen in earlier paper runs. It remains a research hypothesis only, not a profitability claim.
+
+### Reset Paper State
+
+If you need a clean paper demo after the daily-loss breaker trips or old positions are clogging the slot limit, run:
+
+```bash
+DATABASE_URL=postgresql+psycopg://trader:trader@localhost:55432/trading \
+  uv run python scripts/reset_paper_state.py --yes
+```
+
+This clears paper-mode orders, trades, positions, portfolio state, and stale stream-status rows outside the active symbol allowlist, then recreates a fresh paper portfolio state. It is destructive and intentionally scoped to paper mode.
 
 Paper-trade diagnosis:
 

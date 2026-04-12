@@ -27,6 +27,13 @@ def latest_depth(
 
 
 @router.get("/stream-status", response_model=list[StreamStatusRead])
-def stream_status(db: Session = Depends(get_db)) -> list[StreamStatusRead]:
+def stream_status(
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> list[StreamStatusRead]:
     service = MarketDepthService(db=db)
-    return [StreamStatusRead.model_validate(item, from_attributes=True) for item in service.list_stream_status()]
+    payloads = service.stream_status_payloads(
+        stale_after_seconds=settings.stream_stale_after_seconds,
+        symbols=set(settings.symbol_allowlist_list),
+    )
+    return [StreamStatusRead.model_validate(item) for item in payloads]

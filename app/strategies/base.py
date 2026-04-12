@@ -33,8 +33,19 @@ class BaseStrategy(ABC):
     def should_enter(self, row: pd.Series, has_position: bool) -> bool:
         return bool(row.get("entry", False)) and not has_position
 
-    def should_exit(self, row: pd.Series, has_position: bool) -> bool:
-        return bool(row.get("exit", False)) and has_position
+    def should_exit(
+        self,
+        row: pd.Series,
+        has_position: bool,
+        position_side: PositionSide | None = None,
+    ) -> bool:
+        if not has_position:
+            return False
+        if position_side == PositionSide.LONG and "exit_long" in row:
+            return bool(row.get("exit_long", False))
+        if position_side == PositionSide.SHORT and "exit_short" in row:
+            return bool(row.get("exit_short", False))
+        return bool(row.get("exit", False))
 
     def desired_position_side(self, row: pd.Series) -> PositionSide:
         signal = float(row.get("signal", 0.0) or 0.0)

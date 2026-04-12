@@ -164,7 +164,7 @@ class BacktestService:
                         elif side == PositionSide.SHORT and low_price <= take_profit_price:
                             exit_price = take_profit_price
                             exit_reason = "take_profit"
-                        elif strategy.should_exit(row, has_position=True):
+                        elif strategy.should_exit(row, has_position=True, position_side=side):
                             exit_price = close_price
                             exit_reason = "strategy_exit"
 

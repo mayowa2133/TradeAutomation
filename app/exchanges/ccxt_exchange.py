@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-import ccxt
-
 from app.core.config import Settings
 from app.core.enums import OrderStatus, OrderType
 from app.core.exceptions import ConfigurationError, ExchangeAdapterError
 from app.exchanges.base import ExchangeAdapter, ExecutionReport, OrderRequest
+from app.exchanges.ccxt_client_cache import get_private_client, get_public_client
 from app.utils.fees import calculate_fee
 
 
@@ -15,21 +14,18 @@ class CCXTExchange(ExchangeAdapter):
     def __init__(self, settings: Settings, allow_private: bool = False) -> None:
         self.settings = settings
         self.allow_private = allow_private
-        exchange_cls = getattr(ccxt, settings.exchange_name, None)
-        if exchange_cls is None:
-            raise ConfigurationError(f"Unsupported CCXT exchange: {settings.exchange_name}")
-        config: dict[str, Any] = {"enableRateLimit": True}
         if allow_private:
             settings.require_live_trading_ready()
-            config.update(
-                {
-                    "apiKey": settings.exchange_api_key,
-                    "secret": settings.exchange_api_secret,
-                }
+            if not settings.exchange_api_key or not settings.exchange_api_secret:
+                raise ConfigurationError("Live spot trading requires EXCHANGE_API_KEY and EXCHANGE_API_SECRET.")
+            self.client = get_private_client(
+                settings.exchange_name,
+                settings.exchange_api_key,
+                settings.exchange_api_secret,
+                settings.exchange_api_password,
             )
-            if settings.exchange_api_password:
-                config["password"] = settings.exchange_api_password
-        self.client = exchange_cls(config)
+        else:
+            self.client = get_public_client(settings.exchange_name)
 
     def _require_private(self) -> None:
         if not self.allow_private:

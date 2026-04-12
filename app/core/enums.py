@@ -61,6 +61,7 @@ class DecisionSource(str, Enum):
     STRATEGY = "strategy"
     OPTIMIZER = "optimizer"
     LLM = "llm"
+    RISK = "risk"
     MANUAL = "manual"
     SYSTEM = "system"
 

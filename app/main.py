@@ -164,11 +164,10 @@ async def market_stream(
                 depth_service = MarketDepthService(db=db)
                 quote = depth_service.latest_quote(symbol, instrument_type)
                 orderbook = depth_service.latest_orderbook(symbol, instrument_type)
-                stream_rows = [
-                    item
-                    for item in depth_service.list_stream_status()
-                    if item.symbol == symbol
-                ]
+                stream_rows = depth_service.stream_status_payloads(
+                    stale_after_seconds=settings.stream_stale_after_seconds,
+                    symbols={symbol},
+                )
             await websocket.send_json(
                 {
                     "symbol": symbol,
@@ -194,10 +193,10 @@ async def market_stream(
                     else None,
                     "stream_status": [
                         {
-                            "stream_name": row.stream_name,
-                            "status": row.status.value,
-                            "error_message": row.error_message,
-                            "last_message_at": row.last_message_at.isoformat() if row.last_message_at else None,
+                            "stream_name": row["stream_name"],
+                            "status": row["status"],
+                            "error_message": row["error_message"],
+                            "last_message_at": row["last_message_at"].isoformat() if row["last_message_at"] else None,
                         }
                         for row in stream_rows
                     ],

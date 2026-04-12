@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from app.core.config import get_settings
-from app.services.strategy_registry import StrategyRegistry
 from app.workers.tasks import (
-    evaluate_enabled_strategy,
+    evaluate_signals_with_ranking,
     ingest_news,
     refresh_symbol_timeframe,
     review_with_llm,
@@ -16,17 +15,7 @@ def refresh_market_data_job(symbol: str, timeframe: str, limit: int = 300) -> No
 
 
 def evaluate_signals_job() -> None:
-    settings = get_settings()
-    strategy_names = StrategyRegistry().names()
-    for strategy_name in strategy_names:
-        for symbol in settings.symbol_allowlist_list:
-            for timeframe in settings.default_timeframes_list:
-                evaluate_enabled_strategy(
-                    strategy_name=strategy_name,
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    limit=300,
-                )
+    evaluate_signals_with_ranking()
 
 
 def refresh_news_job() -> None:

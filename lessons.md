@@ -23,8 +23,19 @@
 - Faster demo profiles are useful for showing the dashboard, but they should live behind explicit config or scripts. Demo tuning is for observability, not evidence of better trading performance.
 - If removing fees and slippage turns a strategy from mildly positive into clearly negative, the core issue is turnover and cost structure, not the absence of an AI decision layer.
 - A recent-sample parameter set that looks better is only a research lead. Treat it as a hypothesis that still needs out-of-sample validation, not as proof of edge.
+- Execution enums and database enums have to evolve together. A new decision-source path that exists only in Python can still crash a healthy worker the first time a real stop-loss fires in Postgres.
 - A scheduler “refresh” job is not a real refresh if it returns cached DB rows once `limit` bars already exist. For live paper-trading loops, refresh paths need an explicit forced fetch mode or they silently freeze market state.
 - When a hard guard like max daily loss fires inside a scheduler loop, treat it as a first-class operating state rather than an exception flood. The order should remain rejected, but the scheduler should keep running cleanly.
+- A market-data stream that says `connecting` for hours is worse than a clearly degraded stream. Operators need truthful websocket status so they know when the system is trading off REST refreshes instead of live depth updates.
+- Public websocket clients need explicit recv timeouts and reconnect logic. Otherwise a silent connection can sit open forever and make the dashboard look healthier than the feed really is.
+- “Research profile” does not mean “as selective as possible.” If a profile is so restrictive that it produces zero trades over a long paper session, it is not generating enough evidence to evaluate.
+- Exchange sequence counters can exceed ordinary 32-bit integer assumptions. If order-book snapshot storage uses a narrow integer type, the stream can fail only under live load and never in small local tests.
+- Failure reporting paths need their own guardrails. If an exception string is too large for the persistence field that records it, the monitoring layer can crash while trying to report the original problem.
+- Breakout exits need to be side-aware. A generic “price left the channel” exit can conflict with the same bar’s entry condition and turn a trend-following rule into self-canceling noise.
+- A minimum breakout-strength floor is a better first response than adding AI when the live issue is shallow channel pokes that barely clear the threshold.
+- If a live paper run keeps losing on weaker symbols, prune the universe before adding more strategies. Candidate ranking is more useful than first-come execution once the worker is evaluating multiple valid entries at the same time.
+- A paper-state reset is a destructive operation. It should be a separate explicit script or operator action, not an implicit side effect of dashboard startup or scheduler recovery.
+- Dashboard operational views should prefer the current allowlist over raw historical rows. Otherwise stale state from previous experiments makes the system look noisier and less healthy than it really is.
 
 ## Agent Misuse Risks
 
@@ -46,6 +57,11 @@
 - updated README, HANDOFF, and frontend docs so operators are not following spot-only instructions against a derivatives-capable codebase
 - separated dashboard demo tuning from lower-turnover research tuning so product demos stop contaminating strategy evaluation
 - added lightweight paper-trade loss analysis and an Overview trade timeline because loss diagnosis needs to be visible from the product surface, not only from ad hoc SQL
+- tuned the slower 15-minute breakout preset to widen the universe slightly and loosen confirmation just enough to improve sample generation without reverting to fee-heavy demo churn
+- fixed stream-status reporting so stale Bybit websocket rows degrade or disconnect based on heartbeat/message age instead of showing a misleading forever-connecting state
+- widened the order-book sequence type and normalized stored stream errors after the live Bybit stream exposed schema assumptions that were too small for production traffic
+- fixed the live paper-trading stop-loss path after a real runtime exception exposed that `DecisionSource.RISK` existed in the execution logic but not in the enum or Postgres type
+- split breakout exits into side-specific `exit_long` and `exit_short` signals and added a minimum breakout-strength filter after the 15-minute paper run showed simultaneous entry/exit states and low-quality micro-breakouts
 
 ## What We Would Do Differently In V2
 

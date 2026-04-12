@@ -259,6 +259,152 @@ class ExecutionService:
             return cooldown_until
         return None
 
+    def _strategy_instance_timeframe(self, strategy_instance_name: str) -> str | None:
+        if "@" not in strategy_instance_name:
+            return None
+        return strategy_instance_name.rsplit("@", 1)[-1]
+
+    def preview_strategy_candidate(
+        self,
+        *,
+        strategy_name: str,
+        symbol: str,
+        timeframe: str,
+        limit: int = 300,
+        instrument_type: InstrumentType | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, object]:
+        now = now or datetime.now(timezone.utc)
+        instrument_type = instrument_type or (
+            InstrumentType.PERPETUAL if self.settings.enable_derivatives else InstrumentType.SPOT
+        )
+        strategy_instance_name = f"{strategy_name}@{timeframe}"
+        strategy = self.registry.create_strategy(strategy_name, db=self.db)
+        frame = self.data_service.get_historical_data(
+            symbol=symbol,
+            timeframe=timeframe,
+            limit=limit,
+            instrument_type=instrument_type,
+        )
+        if frame.empty:
+            return {"action": "no_data", "strategy_name": strategy_name, "symbol": symbol, "timeframe": timeframe}
+
+        signal_frame = strategy.generate_signals(frame)
+        selected_bar_timestamp, selected_row, selection_reason = self._selected_signal_row(
+            signal_frame=signal_frame,
+            timeframe=timeframe,
+            now=now,
+        )
+        latest_price = float(signal_frame.iloc[-1]["close"])
+        if selected_bar_timestamp is None or selected_row is None:
+            return {
+                "action": "flat",
+                "reason": selection_reason,
+                "strategy_name": strategy_name,
+                "strategy_instance_name": strategy_instance_name,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "instrument_type": instrument_type.value,
+                "confidence": 0.0,
+            }
+
+        if self._bar_already_processed(
+            strategy_name=strategy_instance_name,
+            symbol=symbol,
+            instrument_type=instrument_type,
+            bar_timestamp=selected_bar_timestamp,
+        ):
+            return {
+                "action": "flat",
+                "reason": "bar_already_processed",
+                "strategy_name": strategy_name,
+                "strategy_instance_name": strategy_instance_name,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "instrument_type": instrument_type.value,
+                "confidence": 0.0,
+            }
+
+        open_position = self.portfolio_service.get_position(
+            strategy_name=strategy_instance_name,
+            symbol=symbol,
+            instrument_type=instrument_type,
+        )
+        if open_position is not None:
+            return {
+                "action": "occupied",
+                "reason": "position_open",
+                "strategy_name": strategy_name,
+                "strategy_instance_name": strategy_instance_name,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "instrument_type": instrument_type.value,
+                "confidence": float(selected_row.get("confidence", 0.0) or 0.0),
+                "latest_price": latest_price,
+                "position_side": open_position.side.value,
+            }
+
+        cooldown_until = self._strategy_cooldown_until(
+            strategy_name=strategy_instance_name,
+            symbol=symbol,
+            instrument_type=instrument_type,
+            timeframe=timeframe,
+            now=now,
+        )
+        if cooldown_until is not None:
+            return {
+                "action": "flat",
+                "reason": "strategy_cooldown_active",
+                "cooldown_until": cooldown_until.isoformat(),
+                "strategy_name": strategy_name,
+                "strategy_instance_name": strategy_instance_name,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "instrument_type": instrument_type.value,
+                "confidence": 0.0,
+            }
+
+        if not strategy.should_enter(selected_row, has_position=False):
+            return {
+                "action": "flat",
+                "reason": "no_entry_signal",
+                "strategy_name": strategy_name,
+                "strategy_instance_name": strategy_instance_name,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "instrument_type": instrument_type.value,
+                "confidence": float(selected_row.get("confidence", 0.0) or 0.0),
+            }
+
+        signal_side = strategy.desired_position_side(selected_row)
+        if instrument_type == InstrumentType.SPOT and signal_side == PositionSide.SHORT:
+            return {
+                "action": "flat",
+                "reason": "spot_short_disabled",
+                "strategy_name": strategy_name,
+                "strategy_instance_name": strategy_instance_name,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "instrument_type": instrument_type.value,
+                "confidence": 0.0,
+            }
+
+        confidence = float(selected_row.get("confidence", 0.0) or 0.0)
+        return {
+            "action": "entry",
+            "reason": "entry_signal",
+            "strategy_name": strategy_name,
+            "strategy_instance_name": strategy_instance_name,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "instrument_type": instrument_type.value,
+            "bar_timestamp": selected_bar_timestamp.isoformat() if selected_bar_timestamp is not None else None,
+            "side": signal_side.value,
+            "confidence": confidence,
+            "signal": int(selected_row.get("signal", 0) or 0),
+            "latest_price": latest_price,
+        }
+
     def _reject_order(
         self,
         *,
@@ -901,7 +1047,7 @@ class ExecutionService:
                     return {"action": "exit", "reason": "take_profit", "strategy_name": strategy_name}
             signal_side = strategy.desired_position_side(selected_row)
             opposite_signal = bool(selected_row.get("entry", False)) and signal_side != open_position.side
-            if strategy.should_exit(selected_row, has_position=True) or opposite_signal:
+            if strategy.should_exit(selected_row, has_position=True, position_side=open_position.side) or opposite_signal:
                 self.close_position(open_position, float(selected_row["close"]), "strategy_exit")
                 return {"action": "exit", "reason": "strategy_exit", "strategy_name": strategy_name}
             return {"action": "hold", "strategy_name": strategy_name, "symbol": symbol}

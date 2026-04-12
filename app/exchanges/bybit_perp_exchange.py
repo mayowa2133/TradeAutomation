@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-import ccxt
-
 from app.core.config import Settings
 from app.core.enums import OrderStatus
 from app.core.exceptions import ConfigurationError, ExchangeAdapterError
 from app.exchanges.base import ExchangeAdapter, ExecutionReport, OrderRequest
+from app.exchanges.ccxt_client_cache import get_private_client, get_public_client
 from app.utils.fees import calculate_fee
 
 
@@ -15,16 +14,20 @@ class BybitPerpExchange(ExchangeAdapter):
     def __init__(self, settings: Settings, allow_private: bool = False) -> None:
         self.settings = settings
         self.allow_private = allow_private
-        config: dict[str, Any] = {"enableRateLimit": True, "options": {"defaultType": "swap"}}
         if allow_private:
             settings.require_live_derivatives_ready()
-            config.update(
-                {
-                    "apiKey": settings.derivatives_api_key,
-                    "secret": settings.derivatives_api_secret,
-                }
+            if not settings.derivatives_api_key or not settings.derivatives_api_secret:
+                raise ConfigurationError(
+                    "Live derivatives trading requires DERIVATIVES_API_KEY and DERIVATIVES_API_SECRET."
+                )
+            self.client = get_private_client(
+                settings.derivatives_exchange_name,
+                settings.derivatives_api_key,
+                settings.derivatives_api_secret,
+                default_type="swap",
             )
-        self.client = ccxt.bybit(config)
+        else:
+            self.client = get_public_client(settings.derivatives_exchange_name, default_type="swap")
 
     def _require_private(self) -> None:
         if not self.allow_private:

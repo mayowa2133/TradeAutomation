@@ -77,6 +77,8 @@ class Settings(BaseSettings):
     optimizer_refresh_seconds: int = 300
     stream_worker_enabled: bool = False
     bybit_ws_public_url: str = "wss://stream.bybit.com/v5/public/linear"
+    stream_message_timeout_seconds: int = 30
+    stream_stale_after_seconds: int = 120
     precision_cache_ttl_seconds: int = 3600
     default_execution_model: str = "candle"
     evaluate_on_bar_close_only: bool = True

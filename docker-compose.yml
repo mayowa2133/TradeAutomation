@@ -41,6 +41,11 @@ services:
       REDIS_URL: redis://redis:6379/0
       SCHEDULER_ENABLED: "false"
       AUTO_CREATE_TABLES: "false"
+      DEFAULT_TIMEFRAMES: "15m"
+      SYMBOL_ALLOWLIST: "BTC/USDT,ETH/USDT"
+      MAX_POSITION_NOTIONAL_PCT: "0.08"
+      DEFAULT_LEVERAGE: "1.5"
+      MAX_CONCURRENT_POSITIONS: "2"
     depends_on:
       postgres:
         condition: service_healthy
@@ -68,6 +73,12 @@ services:
       REDIS_URL: redis://redis:6379/0
       SCHEDULER_ENABLED: "true"
       AUTO_CREATE_TABLES: "false"
+      MARKET_REFRESH_SECONDS: "180"
+      DEFAULT_TIMEFRAMES: "15m"
+      SYMBOL_ALLOWLIST: "BTC/USDT,ETH/USDT"
+      MAX_POSITION_NOTIONAL_PCT: "0.08"
+      DEFAULT_LEVERAGE: "1.5"
+      MAX_CONCURRENT_POSITIONS: "2"
     depends_on:
       postgres:
         condition: service_healthy
@@ -83,6 +94,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    restart: unless-stopped
     env_file:
       - path: .env.example
         required: true
@@ -93,6 +105,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       AUTO_CREATE_TABLES: "false"
       STREAM_WORKER_ENABLED: "true"
+      DEFAULT_TIMEFRAMES: "15m"
+      SYMBOL_ALLOWLIST: "BTC/USDT,ETH/USDT"
     depends_on:
       postgres:
         condition: service_healthy

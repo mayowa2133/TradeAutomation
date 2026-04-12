@@ -48,8 +48,16 @@ The repository now contains a runnable expanded platform with:
 - normalized scheduled risk rejections so a daily-loss or other hard-risk block is treated as an expected evaluation outcome instead of a scheduler job failure
 - added `scripts/tune_demo_mode.py` to apply a reproducible higher-activity paper-trading profile without weakening live-trading defaults
 - expanded `scripts/tune_demo_mode.py` into named demo and research presets so dashboard demos and lower-turnover experiments use explicit profiles
+- tuned the `research-breakout-15m` preset to narrow the symbol universe to `BTC/USDT` and `ETH/USDT`, add candidate ranking, and keep the slower 15-minute paper sample focused on the strongest majors instead of the noisier alt pairs
 - added `scripts/analyze_paper_trades.py` to summarize paper-mode losses by strategy, symbol, fees, hold times, and realized PnL
+- added `scripts/reset_paper_state.py` so the paper account can be cleared and reinitialized cleanly after a demo session or daily-loss shutdown
+- dashboard and market-status endpoints now filter stream-health rows to the active symbol allowlist so stale ADA/SOL/XRP rows stop polluting the BTC/ETH research view
 - added an Overview trade timeline panel that reconstructs the recent realized path from exit trades and shows the latest fills in one place
+- hardened websocket stream health reporting so stale or silent Bybit public streams stop appearing as indefinitely `connecting`
+- added websocket receive-timeout reconnect logic and heartbeat-aware stream status serialization for dashboard and API consumers
+- fixed Bybit order-book persistence for large exchange sequence values and bounded stored stream-status error text so the public stream worker no longer crashes on those two failure modes
+- fixed the broken risk-exit path by adding `DecisionSource.RISK` in code and in the Postgres enum migration, so stop-loss and liquidation exits now persist instead of crashing the scheduler worker
+- redesigned breakout exits to be side-specific and added a minimum breakout-strength filter so the 15-minute research profile stops flagging the same bar as both breakout entry and generic exit
 - replaced the template frontend with a real dashboard and verified lint, test, and production build
 - updated README and frontend docs so local and docker instructions match the actual code paths
 
@@ -69,17 +77,21 @@ The repository now contains a runnable expanded platform with:
 - No premium news provider integration yet; RSS is the current default
 - Stitch MCP screen generation still needs investigation if you want the source-of-truth mockups generated directly inside Stitch
 - The current demo paper account has already breached the configured daily-loss guard, so new entries stay blocked until the state is reset or the demo risk budget is adjusted
+- The dashboard stream-health view is now filtered to the active allowlist, and the paper reset script also clears stale stream-status rows outside that allowlist
 - The new Overview realized-path panel is reconstructed from recent exit trades. It is operationally useful, but it is not a replacement for persisted equity-history storage.
-- Recent paper-trade review showed the fast 1-minute demo profile loses mainly because turnover and fees overwhelm a weak edge. The current improvement direction is slower 15-minute breakout settings on a narrower universe, not an AI execution overlay.
+- Recent paper-trade review showed the fast 1-minute demo profile loses mainly because turnover and fees overwhelm a weak edge. The current improvement direction is slower 15-minute breakout settings on a slightly wider but still selective universe, not an AI execution overlay.
+- Public market-data websocket status is now reported more honestly, but authenticated execution streams and deeper venue-specific reconnection handling are still future work.
+- The repaired 15-minute breakout runtime is operationally cleaner than the earlier version, but the first post-fix paper sample is still net negative. The current narrowed research setup is intentionally focused on `BTC/USDT` and `ETH/USDT`, with ranked candidates and slower market refreshes to reduce Bybit pressure.
 
 ## Next Best Tasks
 
 1. Add authenticated exchange websocket order/fill ingestion for live reconciliation.
-2. Add a reset/demo-state workflow so paper trading can be restarted cleanly after the daily-loss breaker trips during dashboard demos.
+2. Extend the reset/demo-state workflow if you want a softer reset that preserves closed-trade history while still clearing live paper positions and PnL state.
 3. Add equity-history persistence and richer charting/replay views in the frontend.
 4. Add funding-history persistence and scheduled funding application for open paper positions.
 5. Add docker-compose integration tests or smoke tests that cover API plus frontend together.
 6. Investigate the Stitch MCP invalid-argument responses and backfill generated source screens into project `1872692140714476366`.
+7. Re-run the repaired `research-breakout-15m` profile for a longer sample and decide whether the next improvement should be tighter breakout-quality filters, a different exit model, or a further correlation-aware ranking pass.
 
 ## How To Run
 
@@ -135,6 +147,11 @@ uv run python scripts/analyze_paper_trades.py
 ```
 
 If the worker stops opening new demo trades after a noisy session, inspect `/api/v1/dashboard/summary`. The daily-loss guard will intentionally block fresh entries once realized losses exceed the configured threshold.
+
+Recent runtime note:
+
+- `2026-04-11` repair pass added the `risk` exit source, side-specific breakout exits, and `min_breakout_strength_pct=0.001` to the research breakout preset.
+- The first repaired runtime sample confirmed that a stop-driven `ADA/USDT` exit was persisted as a `risk` exit instead of crashing the worker.
 
 ## How To Verify
 

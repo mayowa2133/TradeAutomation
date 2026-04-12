@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -15,6 +16,21 @@ from app.db.models.stream_status import StreamStatus
 class MarketDepthService:
     def __init__(self, db: Session) -> None:
         self.db = db
+
+    def _normalize_datetime(self, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+
+    def _normalize_error_message(self, error_message: str | None) -> str | None:
+        if error_message is None:
+            return None
+        compact = " ".join(error_message.split())
+        if len(compact) <= 1000:
+            return compact
+        return f"{compact[:997]}..."
 
     def persist_orderbook(
         self,
@@ -182,6 +198,58 @@ class MarketDepthService:
     def list_stream_status(self) -> list[StreamStatus]:
         return self.db.query(StreamStatus).order_by(StreamStatus.stream_name.asc(), StreamStatus.symbol.asc()).all()
 
+    def stream_status_payloads(
+        self,
+        *,
+        stale_after_seconds: int | None = None,
+        symbols: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        now = datetime.now(timezone.utc)
+        payloads: list[dict[str, Any]] = []
+        for record in self.list_stream_status():
+            if symbols is not None and record.symbol not in symbols:
+                continue
+            status = record.status
+            metadata = dict(record.stream_metadata or {})
+            error_message = record.error_message
+            last_heartbeat_at = self._normalize_datetime(record.last_heartbeat_at)
+            last_message_at = self._normalize_datetime(record.last_message_at)
+
+            if stale_after_seconds and stale_after_seconds > 0:
+                if last_heartbeat_at is None:
+                    status = StreamHealth.DISCONNECTED
+                    error_message = error_message or "No stream heartbeat recorded."
+                else:
+                    heartbeat_age_seconds = (now - last_heartbeat_at).total_seconds()
+                    if heartbeat_age_seconds > stale_after_seconds:
+                        status = StreamHealth.DISCONNECTED if last_message_at is None else StreamHealth.DEGRADED
+                        metadata["stale_heartbeat_seconds"] = round(heartbeat_age_seconds, 1)
+                        error_message = error_message or (
+                            f"No stream heartbeat received in {int(heartbeat_age_seconds)} seconds."
+                        )
+                    elif last_message_at is not None:
+                        message_age_seconds = (now - last_message_at).total_seconds()
+                        if message_age_seconds > stale_after_seconds:
+                            status = StreamHealth.DEGRADED
+                            metadata["stale_message_seconds"] = round(message_age_seconds, 1)
+                            error_message = error_message or (
+                                f"No market-data message received in {int(message_age_seconds)} seconds."
+                            )
+
+            payloads.append(
+                {
+                    "stream_name": record.stream_name,
+                    "symbol": record.symbol,
+                    "status": status.value,
+                    "stream_metadata": metadata,
+                    "last_message_at": last_message_at,
+                    "last_heartbeat_at": last_heartbeat_at,
+                    "error_message": error_message,
+                    "updated_at": record.updated_at,
+                }
+            )
+        return payloads
+
     def update_stream_status(
         self,
         *,
@@ -203,7 +271,7 @@ class MarketDepthService:
             self.db.add(record)
         record.status = status
         record.stream_metadata = metadata or record.stream_metadata or {}
-        record.error_message = error_message
+        record.error_message = self._normalize_error_message(error_message)
         record.last_heartbeat_at = now
         if touch_message:
             record.last_message_at = now
