@@ -86,7 +86,7 @@ class BacktestService:
     ) -> BacktestResponse:
         fee_bps = fee_bps if fee_bps is not None else self.settings.default_fee_bps
         slippage_bps = slippage_bps if slippage_bps is not None else self.settings.default_slippage_bps
-        strategy = self.registry.create_strategy(strategy_name, db=self.db)
+        strategy = self.registry.create_strategy(strategy_name, db=self.db, symbol=symbol)
         signals = strategy.generate_signals(market_data)
         balance = float(self.settings.paper_starting_balance)
         equity_curve: list[EquityPoint] = []

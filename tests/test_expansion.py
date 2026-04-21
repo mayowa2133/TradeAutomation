@@ -18,6 +18,7 @@ from app.core.enums import (
 )
 from app.db.models.instrument import Instrument
 from app.db.models.order import Order
+from app.db.models.event_log import EventLog
 from app.db.models.portfolio_state import PortfolioState
 from app.db.models.position import Position
 from app.db.models.stream_status import StreamStatus
@@ -389,6 +390,15 @@ def test_reset_paper_state_clears_paper_records(db_session, settings):
         reference_price=100.0,
         leverage=2.0,
     )
+    db_session.add(
+        EventLog(
+            level="INFO",
+            event_type="demo_event",
+            message="should be cleared by reset",
+            payload={},
+        )
+    )
+    db_session.commit()
     depth = MarketDepthService(db=db_session)
     depth.update_stream_status(
         stream_name="bybit_public_linear",
@@ -418,6 +428,7 @@ def test_reset_paper_state_clears_paper_records(db_session, settings):
         assert fresh_db.query(Order).count() == 0
         assert fresh_db.query(Position).count() == 0
         assert fresh_db.query(Trade).count() == 0
+        assert fresh_db.query(EventLog).count() == 0
         state = fresh_db.query(PortfolioState).one()
         assert state.cash_balance == settings.paper_starting_balance
         assert fresh_db.query(StreamStatus).count() == 1
@@ -428,6 +439,8 @@ def test_research_profile_targets_two_symbols():
     profile_source = (Path(__file__).resolve().parents[1] / "scripts" / "tune_demo_mode.py").read_text()
 
     assert '"SYMBOL_ALLOWLIST": "BTC/USDT,ETH/USDT"' in profile_source
+    assert '"STRATEGY_EXIT_COOLDOWN_MINUTES": 15' in profile_source
+    assert '"allow_short": False' in profile_source
     assert '"MAX_CONCURRENT_POSITIONS": 2' in profile_source
     assert '"MARKET_REFRESH_SECONDS": 180' in profile_source
 

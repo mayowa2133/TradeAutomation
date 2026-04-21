@@ -71,6 +71,7 @@ PROFILES: dict[str, StrategyProfile] = {
             "This profile is a research hypothesis, not evidence of production alpha.",
             "It stays materially slower than the 1-minute demo profile, but now narrows the universe to the strongest liquid majors for a cleaner sample.",
             "Recent sample analysis suggested the current 1-minute demo profile loses mainly to cost and turnover, so this profile prioritizes selectivity and candidate ranking over activity.",
+            "BTC shorts are disabled here until BTC shows a durable edge, and the breakout filter now requires higher-timeframe trend confirmation plus ATR/volume quality checks.",
         ],
         "runtime_recommendations": {
             "DEFAULT_TIMEFRAMES": "15m",
@@ -79,6 +80,7 @@ PROFILES: dict[str, StrategyProfile] = {
             "DEFAULT_LEVERAGE": 1.5,
             "MAX_CONCURRENT_POSITIONS": 2,
             "MARKET_REFRESH_SECONDS": 180,
+            "STRATEGY_EXIT_COOLDOWN_MINUTES": 15,
         },
         "strategies": {
             "ema_crossover": {
@@ -97,6 +99,30 @@ PROFILES: dict[str, StrategyProfile] = {
                     "exit_lookback": 18,
                     "buffer_pct": 0.001,
                     "min_breakout_strength_pct": 0.001,
+                    "min_atr_pct": 0.001,
+                    "min_volume_ratio": 1.0,
+                    "max_breakout_extension_pct": 0.012,
+                    "trend_timeframe": "1h",
+                    "trend_ema_window": 24,
+                    "trend_margin_pct": 0.001,
+                    "symbol_overrides": {
+                        "BTC/USDT": {
+                            "allow_short": False,
+                            "min_breakout_strength_pct": 0.0015,
+                            "min_atr_pct": 0.00125,
+                            "min_volume_ratio": 1.05,
+                            "max_breakout_extension_pct": 0.01,
+                            "trend_margin_pct": 0.0015,
+                        },
+                        "ETH/USDT": {
+                            "allow_short": True,
+                            "min_breakout_strength_pct": 0.0012,
+                            "min_atr_pct": 0.001,
+                            "min_volume_ratio": 0.98,
+                            "max_breakout_extension_pct": 0.014,
+                            "trend_margin_pct": 0.00075,
+                        },
+                    },
                     "stop_loss_pct": 0.018,
                     "take_profit_pct": 0.05,
                 },

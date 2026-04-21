@@ -48,9 +48,11 @@ The repository now contains a runnable expanded platform with:
 - normalized scheduled risk rejections so a daily-loss or other hard-risk block is treated as an expected evaluation outcome instead of a scheduler job failure
 - added `scripts/tune_demo_mode.py` to apply a reproducible higher-activity paper-trading profile without weakening live-trading defaults
 - expanded `scripts/tune_demo_mode.py` into named demo and research presets so dashboard demos and lower-turnover experiments use explicit profiles
-- tuned the `research-breakout-15m` preset to narrow the symbol universe to `BTC/USDT` and `ETH/USDT`, add candidate ranking, and keep the slower 15-minute paper sample focused on the strongest majors instead of the noisier alt pairs
+- tuned the `research-breakout-15m` preset to narrow the symbol universe to `BTC/USDT` and `ETH/USDT`, add candidate ranking, disable BTC shorts, and keep the slower 15-minute paper sample focused on the strongest majors instead of the noisier alt pairs
+- added higher-timeframe trend confirmation plus ATR/volume quality filters to the breakout strategy so the remaining shorts only trigger in a more clearly bearish regime and late weak breakouts get filtered out earlier
 - added `scripts/analyze_paper_trades.py` to summarize paper-mode losses by strategy, symbol, fees, hold times, and realized PnL
 - added `scripts/reset_paper_state.py` so the paper account can be cleared and reinitialized cleanly after a demo session or daily-loss shutdown
+- extended `scripts/reset_paper_state.py` to clear event logs as well, so weekly paper baselines do not inherit stale operational noise in the dashboard
 - dashboard and market-status endpoints now filter stream-health rows to the active symbol allowlist so stale ADA/SOL/XRP rows stop polluting the BTC/ETH research view
 - added an Overview trade timeline panel that reconstructs the recent realized path from exit trades and shows the latest fills in one place
 - hardened websocket stream health reporting so stale or silent Bybit public streams stop appearing as indefinitely `connecting`
@@ -78,10 +80,12 @@ The repository now contains a runnable expanded platform with:
 - Stitch MCP screen generation still needs investigation if you want the source-of-truth mockups generated directly inside Stitch
 - The current demo paper account has already breached the configured daily-loss guard, so new entries stay blocked until the state is reset or the demo risk budget is adjusted
 - The dashboard stream-health view is now filtered to the active allowlist, and the paper reset script also clears stale stream-status rows outside that allowlist
+- The paper reset script now clears event logs too, so a weekly reset gives you a cleaner dashboard baseline instead of carrying forward old operational messages.
 - The new Overview realized-path panel is reconstructed from recent exit trades. It is operationally useful, but it is not a replacement for persisted equity-history storage.
 - Recent paper-trade review showed the fast 1-minute demo profile loses mainly because turnover and fees overwhelm a weak edge. The current improvement direction is slower 15-minute breakout settings on a slightly wider but still selective universe, not an AI execution overlay.
 - Public market-data websocket status is now reported more honestly, but authenticated execution streams and deeper venue-specific reconnection handling are still future work.
 - The repaired 15-minute breakout runtime is operationally cleaner than the earlier version, but the first post-fix paper sample is still net negative. The current narrowed research setup is intentionally focused on `BTC/USDT` and `ETH/USDT`, with ranked candidates and slower market refreshes to reduce Bybit pressure.
+- The updated 15-minute breakout runtime now uses BTC short lockout plus higher-timeframe trend and ATR/volume quality filters. That should reduce the weakest entries, but it still needs a longer paper sample before anyone should treat it as validated for real money.
 
 ## Next Best Tasks
 

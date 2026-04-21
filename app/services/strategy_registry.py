@@ -70,6 +70,7 @@ class StrategyRegistry:
         name: str,
         db: Session | None = None,
         overrides: dict[str, Any] | None = None,
+        symbol: str | None = None,
     ) -> BaseStrategy:
         strategy_cls = self._registry.get(name)
         if strategy_cls is None:
@@ -78,6 +79,11 @@ class StrategyRegistry:
         if db is not None:
             config = self.get_db_config(db, name)
             parameters.update(config.parameters)
+            symbol_overrides = parameters.get("symbol_overrides")
+            if symbol and isinstance(symbol_overrides, dict):
+                symbol_parameters = symbol_overrides.get(symbol)
+                if isinstance(symbol_parameters, dict):
+                    parameters.update(symbol_parameters)
         if overrides:
             parameters.update(overrides)
         return strategy_cls(parameters=parameters)

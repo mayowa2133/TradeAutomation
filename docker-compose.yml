@@ -46,6 +46,7 @@ services:
       MAX_POSITION_NOTIONAL_PCT: "0.08"
       DEFAULT_LEVERAGE: "1.5"
       MAX_CONCURRENT_POSITIONS: "2"
+      STRATEGY_EXIT_COOLDOWN_MINUTES: "15"
     depends_on:
       postgres:
         condition: service_healthy
@@ -79,6 +80,7 @@ services:
       MAX_POSITION_NOTIONAL_PCT: "0.08"
       DEFAULT_LEVERAGE: "1.5"
       MAX_CONCURRENT_POSITIONS: "2"
+      STRATEGY_EXIT_COOLDOWN_MINUTES: "15"
     depends_on:
       postgres:
         condition: service_healthy

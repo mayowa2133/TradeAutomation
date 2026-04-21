@@ -34,7 +34,10 @@
 - Breakout exits need to be side-aware. A generic “price left the channel” exit can conflict with the same bar’s entry condition and turn a trend-following rule into self-canceling noise.
 - A minimum breakout-strength floor is a better first response than adding AI when the live issue is shallow channel pokes that barely clear the threshold.
 - If a live paper run keeps losing on weaker symbols, prune the universe before adding more strategies. Candidate ranking is more useful than first-come execution once the worker is evaluating multiple valid entries at the same time.
+- Symbol-specific lockouts are sometimes the correct fix. BTC shorts were losing enough that the research profile now disables them while still allowing ETH shorts under a stricter trend filter.
+- Breakout quality filters work best when they are layered: higher-timeframe trend, ATR, and volume confirmation reduce weak entries more reliably than a single tightened threshold.
 - A paper-state reset is a destructive operation. It should be a separate explicit script or operator action, not an implicit side effect of dashboard startup or scheduler recovery.
+- If you want a true fresh paper baseline, clear event logs too. Otherwise the balance may reset while the dashboard still shows stale operational history.
 - Dashboard operational views should prefer the current allowlist over raw historical rows. Otherwise stale state from previous experiments makes the system look noisier and less healthy than it really is.
 
 ## Agent Misuse Risks

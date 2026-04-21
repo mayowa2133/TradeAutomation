@@ -279,7 +279,7 @@ class ExecutionService:
             InstrumentType.PERPETUAL if self.settings.enable_derivatives else InstrumentType.SPOT
         )
         strategy_instance_name = f"{strategy_name}@{timeframe}"
-        strategy = self.registry.create_strategy(strategy_name, db=self.db)
+        strategy = self.registry.create_strategy(strategy_name, db=self.db, symbol=symbol)
         frame = self.data_service.get_historical_data(
             symbol=symbol,
             timeframe=timeframe,
@@ -613,7 +613,7 @@ class ExecutionService:
 
         strategy = None
         if strategy_name and strategy_name in self.registry.names():
-            strategy = self.registry.create_strategy(strategy_name, db=self.db)
+            strategy = self.registry.create_strategy(strategy_name, db=self.db, symbol=symbol)
 
         portfolio = self.portfolio_service.recalculate_state({symbol: reference_price})
         stop_loss_pct = stop_loss_pct if stop_loss_pct is not None else (strategy.stop_loss_pct() if strategy else 0.015)
@@ -966,7 +966,7 @@ class ExecutionService:
             InstrumentType.PERPETUAL if self.settings.enable_derivatives else InstrumentType.SPOT
         )
         strategy_instance_name = f"{strategy_name}@{timeframe}"
-        strategy = self.registry.create_strategy(strategy_name, db=self.db)
+        strategy = self.registry.create_strategy(strategy_name, db=self.db, symbol=symbol)
         frame = self.data_service.get_historical_data(
             symbol=symbol,
             timeframe=timeframe,
