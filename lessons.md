@@ -39,6 +39,8 @@
 - A paper-state reset is a destructive operation. It should be a separate explicit script or operator action, not an implicit side effect of dashboard startup or scheduler recovery.
 - If you want a true fresh paper baseline, clear event logs too. Otherwise the balance may reset while the dashboard still shows stale operational history.
 - Dashboard operational views should prefer the current allowlist over raw historical rows. Otherwise stale state from previous experiments makes the system look noisier and less healthy than it really is.
+- Dust-sized residual positions can block the scheduler if broker precision rounds a float artifact below the lot size. Treat values that are within a tiny tolerance of an increment boundary as that increment, and add regression tests around close-position paths.
+- Partial-exit accounting must allocate entry fees against original entry quantity, not the current remaining position quantity. Otherwise the final close of a small remainder can be charged the full entry fee again and distort realized PnL.
 
 ## Agent Misuse Risks
 
@@ -65,6 +67,8 @@
 - widened the order-book sequence type and normalized stored stream errors after the live Bybit stream exposed schema assumptions that were too small for production traffic
 - fixed the live paper-trading stop-loss path after a real runtime exception exposed that `DecisionSource.RISK` existed in the execution logic but not in the enum or Postgres type
 - split breakout exits into side-specific `exit_long` and `exit_short` signals and added a minimum breakout-strength filter after the 15-minute paper run showed simultaneous entry/exit states and low-quality micro-breakouts
+- fixed lot-size rounding for dust remainders after the live ETH short hit take-profit but the worker could not close a `0.01`-lot residual due to floating-point drift
+- fixed partial-exit fee allocation after the ETH dust close showed the final remainder could overstate costs by allocating the whole original entry fee again
 
 ## What We Would Do Differently In V2
 

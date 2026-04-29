@@ -847,8 +847,10 @@ class ExecutionService:
         remaining_quantity = max(original_quantity - close_quantity, 0.0)
         direction = _direction(position.side)
         gross_pnl = direction * (report.fill_price - position.avg_entry_price) * close_quantity
-        entry_fee_total = sum(trade.fee_paid for trade in position.trades if trade.action == TradeAction.ENTRY)
-        entry_fee_alloc = entry_fee_total * (close_quantity / original_quantity) if original_quantity else 0.0
+        entry_trades = [trade for trade in position.trades if trade.action == TradeAction.ENTRY]
+        entry_fee_total = sum(trade.fee_paid for trade in entry_trades)
+        entry_quantity_total = sum(trade.quantity for trade in entry_trades)
+        entry_fee_alloc = entry_fee_total * (close_quantity / entry_quantity_total) if entry_quantity_total else 0.0
         funding_alloc = position.funding_cost * (close_quantity / original_quantity) if original_quantity else 0.0
         collateral_release = position.collateral * (close_quantity / original_quantity) if original_quantity else 0.0
         realized_pnl = gross_pnl - entry_fee_alloc - report.fee_paid - funding_alloc

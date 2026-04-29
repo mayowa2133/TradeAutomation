@@ -5,6 +5,7 @@ from importlib import util as importlib_util
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from app.core.enums import (
     DecisionSource,
@@ -36,6 +37,7 @@ from app.services.strategy_registry import StrategyRegistry
 from app.core.exceptions import RiskCheckFailed
 from app.exchanges.ccxt_client_cache import get_public_client
 from app.db.session import get_session_factory
+from app.utils.precision import round_to_increment
 from app.workers.tasks import evaluate_enabled_strategy
 from app.workers.tasks import rank_entry_candidates
 
@@ -79,6 +81,11 @@ def test_precision_rounding_and_min_notional(db_session, settings):
     assert normalized.quantity == 0.104
     assert normalized.limit_price == 100.5
     assert normalized.leverage == 5.0
+
+
+def test_precision_rounding_keeps_float_artifact_at_lot_boundary():
+    assert round_to_increment(0.009999999999999787, 0.01) == 0.01
+    assert round_to_increment(0.009, 0.01) == 0.0
 
 
 def test_derivatives_liquidation_buffer_guard(db_session, settings):
@@ -172,6 +179,84 @@ def test_stop_loss_exit_uses_risk_decision_source(db_session, settings):
         .one()
     )
     assert exit_trade.source == DecisionSource.RISK
+
+
+def test_close_position_handles_lot_sized_float_remainder(db_session, settings):
+    seed_perpetual_instrument(db_session)
+    service = ExecutionService(db=db_session, settings=settings, registry=StrategyRegistry())
+    position = Position(
+        strategy_name="breakout@15m",
+        symbol="BTC/USDT",
+        instrument_type=InstrumentType.PERPETUAL,
+        margin_mode=MarginMode.ISOLATED,
+        side=PositionSide.LONG,
+        mode=settings.trading_mode,
+        status=PositionStatus.OPEN,
+        quantity=0.0009999999999999998,
+        leverage=2.0,
+        avg_entry_price=100000.0,
+        current_price=101000.0,
+        entry_notional=100.0,
+        collateral=50.0,
+        unrealized_pnl=1.0,
+        realized_pnl=0.0,
+        stop_loss_price=99000.0,
+        take_profit_price=101000.0,
+        liquidation_price=50000.0,
+        maintenance_margin_rate=0.005,
+        funding_cost=0.0,
+    )
+    db_session.add(position)
+    db_session.commit()
+
+    exit_order = service.close_position(position, 101000.0, "take_profit")
+    db_session.refresh(position)
+
+    assert exit_order.status == OrderStatus.FILLED
+    assert position.status == PositionStatus.CLOSED
+    assert position.quantity == 0.0
+
+
+def test_partial_exit_entry_fee_allocation_uses_entry_quantity(db_session, settings):
+    seed_perpetual_instrument(db_session)
+    service = ExecutionService(db=db_session, settings=settings, registry=StrategyRegistry())
+    service.submit_entry_order(
+        strategy_name="breakout",
+        strategy_instance_name="breakout@15m",
+        symbol="BTC/USDT",
+        reference_price=50000.0,
+        instrument_type=InstrumentType.PERPETUAL,
+        margin_mode=MarginMode.ISOLATED,
+        leverage=2.0,
+        position_side=PositionSide.LONG,
+        quantity=0.1,
+    )
+    position = service.portfolio_service.get_open_positions()[0]
+    entry_trade = (
+        db_session.query(Trade)
+        .filter(Trade.position_id == position.id, Trade.action == TradeAction.ENTRY)
+        .one()
+    )
+    position.quantity = 0.02
+    position.entry_notional = position.avg_entry_price * position.quantity
+    position.collateral = position.entry_notional / position.leverage
+    db_session.add(position)
+    db_session.commit()
+
+    exit_order = service.close_position(position, 51000.0, "strategy_exit")
+    exit_trade = (
+        db_session.query(Trade)
+        .filter(Trade.order_id == exit_order.id, Trade.action == TradeAction.EXIT)
+        .one()
+    )
+
+    expected_entry_fee_alloc = entry_trade.fee_paid * (exit_trade.quantity / entry_trade.quantity)
+    expected_realized = (
+        (exit_trade.price - position.avg_entry_price) * exit_trade.quantity
+        - expected_entry_fee_alloc
+        - exit_trade.fee_paid
+    )
+    assert exit_trade.realized_pnl == pytest.approx(expected_realized)
 
 
 def test_strategy_evaluation_only_acts_once_per_bar(db_session, settings):

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 
 
 def quantize_down(value: float, step: float) -> float:
@@ -16,6 +16,11 @@ def round_to_increment(value: float, increment: float) -> float:
         return float(value)
     value_dec = Decimal(str(value))
     inc_dec = Decimal(str(increment))
+    nearest_steps = (value_dec / inc_dec).to_integral_value(rounding=ROUND_HALF_UP)
+    nearest = nearest_steps * inc_dec
+    tolerance = Decimal(str(max(abs(increment) * 1e-10, 1e-12)))
+    if abs(value_dec - nearest) <= tolerance:
+        return float(nearest)
     rounded = (value_dec // inc_dec) * inc_dec
     return float(rounded)
 
