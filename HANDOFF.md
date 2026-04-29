@@ -157,6 +157,7 @@ Recent runtime note:
 - `2026-04-11` repair pass added the `risk` exit source, side-specific breakout exits, and `min_breakout_strength_pct=0.001` to the research breakout preset.
 - The first repaired runtime sample confirmed that a stop-driven `ADA/USDT` exit was persisted as a `risk` exit instead of crashing the worker.
 - `2026-04-29` runtime review found a profitable dust-sized ETH short remainder that was repeatedly hitting take-profit but failing close normalization because `0.009999999999999787` rounded below the `0.01` lot size. Precision rounding now snaps tiny float artifacts at increment boundaries, partial-exit fee allocation now uses original entry quantity instead of current remaining quantity, and regression coverage protects both cases.
+- Dashboard summary now includes persisted scheduler worker status, recent worker exceptions, and position-level attribution. The frontend command bar and Overview/Settings panels use that data so a healthy API or websocket feed no longer hides a failing trading loop.
 
 ## How To Verify
 

@@ -128,6 +128,24 @@ function formatTimestamp(value: string | null | undefined) {
   return new Date(value).toLocaleString()
 }
 
+function formatDuration(seconds: number | null | undefined) {
+  if (seconds === null || seconds === undefined || Number.isNaN(seconds)) {
+    return 'n/a'
+  }
+  const minutes = Math.max(Math.round(seconds / 60), 0)
+  if (minutes < 60) {
+    return `${minutes}m`
+  }
+  const hours = Math.floor(minutes / 60)
+  const remainder = minutes % 60
+  if (hours < 24) {
+    return remainder ? `${hours}h ${remainder}m` : `${hours}h`
+  }
+  const days = Math.floor(hours / 24)
+  const hourRemainder = hours % 24
+  return hourRemainder ? `${days}d ${hourRemainder}h` : `${days}d`
+}
+
 function sortTradesAscending(items: Trade[]) {
   return [...items].sort(
     (left, right) => new Date(left.trade_time).getTime() - new Date(right.trade_time).getTime(),
@@ -161,7 +179,9 @@ function statusTone(value: string | null | undefined) {
     normalized.includes('retrieving') ||
     normalized.includes('new') ||
     normalized.includes('partial') ||
-    normalized.includes('standby')
+    normalized.includes('standby') ||
+    normalized.includes('starting') ||
+    normalized.includes('unknown')
   ) {
     return 'tone-warning'
   }
@@ -174,7 +194,8 @@ function statusTone(value: string | null | undefined) {
     normalized.includes('kill') ||
     normalized.includes('canceled') ||
     normalized.includes('rejected') ||
-    normalized.includes('misconfigured')
+    normalized.includes('misconfigured') ||
+    normalized.includes('stale')
   ) {
     return 'tone-critical'
   }
@@ -535,6 +556,8 @@ function App() {
   const newsItems = summary?.news ?? []
   const decisions = summary?.llm_decisions ?? []
   const recentEvents = summary?.recent_events ?? []
+  const workerStatus = summary?.worker_status ?? null
+  const positionAttribution = summary?.position_attribution ?? []
   const quote = marketChannel.data?.quote ?? null
   const sectionMeta = sections.find((section) => section.key === activeSection) ?? sections[0]
   const riskStatus =
@@ -555,10 +578,17 @@ function App() {
     portfolio && portfolio.equity > 0 ? portfolio.gross_exposure / Math.max(portfolio.equity, 1) : 0
   const wsStates = [systemChannel.state, marketChannel.state, executionChannel.state]
   const allChannelsHealthy = wsStates.every((state) => state === 'open')
+  const workerHealthy = workerStatus?.status === 'healthy'
+  const runtimeHealthy = allChannelsHealthy && workerHealthy
   const topStatusItems = [
     { label: 'REDIS', value: systemChannel.state === 'open' ? 'OK' : systemChannel.state, tone: statusTone(systemChannel.state) },
     { label: 'DB', value: config ? 'OK' : 'SYNCING', tone: config ? 'tone-positive' : 'tone-warning' },
     { label: 'WS', value: allChannelsHealthy ? 'CONNECTED' : 'RECOVERING', tone: allChannelsHealthy ? 'tone-positive' : 'tone-warning' },
+    {
+      label: 'WORKER',
+      value: workerStatus?.status ? workerStatus.status.toUpperCase() : 'SYNCING',
+      tone: statusTone(workerStatus?.status ?? 'syncing'),
+    },
   ]
 
   const tickerItems = [
@@ -567,7 +597,7 @@ function App() {
     `RISK LOAD ${riskLoadMultiple.toFixed(2)}x`,
     `${config?.trading_mode === 'live' ? 'LIVE' : 'PAPER'} MODE`,
     `DRAWDOWN ${formatPercent(portfolio?.drawdown_pct)}`,
-    `${allChannelsHealthy ? 'SYSTEM NOMINAL' : 'STREAM RECOVERY'}`,
+    `${runtimeHealthy ? 'SYSTEM NOMINAL' : 'OPS REVIEW'}`,
   ]
 
   const allowlist = selectedSymbols
@@ -770,8 +800,8 @@ function App() {
                     ))}
                   </select>
                 </label>
-                <CommandBadge tone={allChannelsHealthy ? 'tone-positive' : 'tone-warning'}>
-                  {allChannelsHealthy ? 'streams healthy' : 'stream recovery'}
+                <CommandBadge tone={runtimeHealthy ? 'tone-positive' : 'tone-warning'}>
+                  {runtimeHealthy ? 'runtime healthy' : 'ops review'}
                 </CommandBadge>
               </>
             }
@@ -922,6 +952,51 @@ function App() {
               </div>
 
               <div className="stack-column">
+                <Panel
+                  title="Worker Health"
+                  eyebrow="Scheduler execution"
+                  actions={
+                    <CommandBadge tone={statusTone(workerStatus?.status)}>
+                      {workerStatus?.status ?? 'unknown'}
+                    </CommandBadge>
+                  }
+                >
+                  <div className="risk-overview">
+                    <div className="mini-stat-grid">
+                      <div className="mini-stat">
+                        <span>Last success</span>
+                        <strong>{formatTime(workerStatus?.last_success_at)}</strong>
+                      </div>
+                      <div className="mini-stat">
+                        <span>Last error</span>
+                        <strong>{formatTime(workerStatus?.last_error_at)}</strong>
+                      </div>
+                      <div className="mini-stat">
+                        <span>Stale after</span>
+                        <strong>{formatDuration(workerStatus?.stale_after_seconds)}</strong>
+                      </div>
+                      <div className="mini-stat">
+                        <span>Last event</span>
+                        <strong>{workerStatus?.last_event_type ?? 'n/a'}</strong>
+                      </div>
+                    </div>
+
+                    {workerStatus?.recent_errors.length ? (
+                      <div className="event-console">
+                        {workerStatus.recent_errors.map((errorItem) => (
+                          <div key={`${errorItem.job_name}-${errorItem.created_at}`} className="event-line">
+                            <span className="event-type tone-critical">[{errorItem.job_name ?? 'worker'}]</span>
+                            <div className="event-message">{errorItem.error ?? errorItem.message}</div>
+                            <time>{formatTime(errorItem.created_at)}</time>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <EmptyState message="No worker exceptions are currently recorded." />
+                    )}
+                  </div>
+                </Panel>
+
                 <Panel title="Stream Health" eyebrow="Realtime plumbing">
                   <div className="stream-card-list">
                     {[
@@ -1314,6 +1389,53 @@ function App() {
                     )}
                   </Panel>
                 </div>
+
+                <Panel title="Position Attribution" eyebrow="Per-position realized path">
+                  {positionAttribution.length ? (
+                    <div className="table-shell compact-shell">
+                      <table className="data-table compact-table">
+                        <thead>
+                          <tr>
+                            <th>ID</th>
+                            <th>Strategy</th>
+                            <th>Symbol</th>
+                            <th>Side</th>
+                            <th>Status</th>
+                            <th>Qty</th>
+                            <th>Entry</th>
+                            <th>Net PnL</th>
+                            <th>Fees</th>
+                            <th>Hold</th>
+                            <th>Exit</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {positionAttribution.slice(0, 10).map((row) => (
+                            <tr key={`attr-${row.position_id}`}>
+                              <td>{row.position_id}</td>
+                              <td>{row.strategy_name}</td>
+                              <td>{row.symbol}</td>
+                              <td>{row.side}</td>
+                              <td>
+                                <CommandBadge tone={statusTone(row.status)}>{row.status}</CommandBadge>
+                              </td>
+                              <td>{formatPrice(row.quantity, 4)}</td>
+                              <td>{formatCompact(row.entry_notional)}</td>
+                              <td className={row.net_pnl >= 0 ? 'text-positive' : 'text-critical'}>
+                                {formatSignedCurrency(row.net_pnl)}
+                              </td>
+                              <td>{formatCurrency(row.total_fees)}</td>
+                              <td>{formatDuration(row.hold_seconds)}</td>
+                              <td>{row.exit_reason ?? 'open'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <EmptyState message="No position attribution is available yet." />
+                  )}
+                </Panel>
               </div>
 
               <div className="stack-column">
@@ -1891,8 +2013,22 @@ function App() {
                 </Panel>
 
                 <Panel title="Worker and Stream Registry" eyebrow="Background services">
-                  {streamStatus.length ? (
+                  {streamStatus.length || workerStatus ? (
                     <div className="stream-card-list worker-grid">
+                      {workerStatus ? (
+                        <div className="worker-card">
+                          <div className="worker-header">
+                            <strong>scheduler_worker</strong>
+                            <CommandBadge tone={statusTone(workerStatus.status)}>{workerStatus.status}</CommandBadge>
+                          </div>
+                          <div className="worker-copy">
+                            success {formatTimestamp(workerStatus.last_success_at)}
+                          </div>
+                          <div className="worker-copy">
+                            error {formatTimestamp(workerStatus.last_error_at)}
+                          </div>
+                        </div>
+                      ) : null}
                       {streamStatus.map((stream) => (
                         <div key={`${stream.stream_name}-${stream.symbol}-settings`} className="worker-card">
                           <div className="worker-header">

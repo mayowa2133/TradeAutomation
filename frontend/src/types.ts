@@ -88,6 +88,8 @@ export interface DashboardSummary {
   portfolio: PortfolioSummary
   risk: RiskSummary
   strategies: StrategyDescriptor[]
+  worker_status: WorkerStatus
+  position_attribution: PositionAttribution[]
   stream_status: StreamStatusItem[]
   optimizer: Record<string, unknown> | null
   news: NewsItem[]
@@ -97,6 +99,45 @@ export interface DashboardSummary {
     message: string
     created_at: string
   }>
+}
+
+export interface WorkerStatus {
+  status: string
+  last_success_at?: string | null
+  last_error_at?: string | null
+  last_event_type?: string | null
+  last_event_message?: string | null
+  stale_after_seconds: number
+  recent_errors: Array<{
+    job_name?: string | null
+    message: string
+    error?: string | null
+    created_at?: string | null
+  }>
+}
+
+export interface PositionAttribution {
+  position_id: number
+  strategy_name: string
+  symbol: string
+  side: string
+  status: string
+  opened_at?: string | null
+  closed_at?: string | null
+  hold_seconds?: number | null
+  entry_notional: number
+  exit_notional: number
+  quantity: number
+  entry_quantity: number
+  exit_quantity: number
+  current_quantity: number
+  realized_pnl: number
+  unrealized_pnl: number
+  net_pnl: number
+  total_fees: number
+  funding_cost: number
+  exit_reason?: string | null
+  win?: boolean | null
 }
 
 export interface Position {

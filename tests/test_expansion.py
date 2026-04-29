@@ -27,6 +27,7 @@ from app.db.models.trade import Trade
 from app.schemas.backtest import BacktestResponse
 from app.services.backtest_service import BacktestService
 from app.services.data_service import DataService
+from app.services.dashboard_service import DashboardService
 from app.services.instrument_service import InstrumentService
 from app.services.market_depth_service import MarketDepthService
 from app.services.news_service import NewsItem, NewsService
@@ -38,6 +39,7 @@ from app.core.exceptions import RiskCheckFailed
 from app.exchanges.ccxt_client_cache import get_public_client
 from app.db.session import get_session_factory
 from app.utils.precision import round_to_increment
+from app.workers import jobs as worker_jobs
 from app.workers.tasks import evaluate_enabled_strategy
 from app.workers.tasks import rank_entry_candidates
 
@@ -548,6 +550,20 @@ def test_worker_risk_rejections_do_not_fail_scheduler(db_session, monkeypatch):
     )
 
 
+def test_worker_job_error_is_persisted(db_session, monkeypatch):
+    def raise_runtime_error():
+        raise RuntimeError("scheduler boom")
+
+    monkeypatch.setattr(worker_jobs, "evaluate_signals_with_ranking", raise_runtime_error)
+
+    with pytest.raises(RuntimeError):
+        worker_jobs.evaluate_signals_job()
+
+    event = db_session.query(EventLog).filter(EventLog.event_type == "worker_job_error").one()
+    assert event.payload["job_name"] == "evaluate_signals"
+    assert event.payload["error"] == "scheduler boom"
+
+
 def test_optimizer_outputs_target_notionals(db_session, settings, synthetic_market_data):
     data = synthetic_market_data.copy()
     from app.services.data_service import DataService
@@ -728,6 +744,66 @@ def test_dashboard_and_market_endpoints(client, db_session, settings):
     assert dashboard_response.json()["portfolio"]["currency"] == "USDT"
     assert [item["symbol"] for item in stream_response.json()] == ["BTC/USDT", "ETH/USDT"]
     assert [item["symbol"] for item in dashboard_response.json()["stream_status"]] == ["BTC/USDT", "ETH/USDT"]
+    assert dashboard_response.json()["worker_status"]["status"] == "unknown"
+    assert isinstance(dashboard_response.json()["position_attribution"], list)
+
+
+def test_dashboard_worker_status_surfaces_latest_error(db_session, settings):
+    db_session.add(
+        EventLog(
+            level="INFO",
+            event_type="worker_job_success",
+            message="evaluate_signals completed successfully.",
+            payload={"job_name": "evaluate_signals"},
+            created_at=datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        )
+    )
+    db_session.add(
+        EventLog(
+            level="ERROR",
+            event_type="worker_job_error",
+            message="evaluate_signals failed: bad quantity",
+            payload={"job_name": "evaluate_signals", "error": "bad quantity"},
+            created_at=datetime(2024, 1, 1, 0, 1, 0, tzinfo=timezone.utc),
+        )
+    )
+    db_session.commit()
+
+    status = DashboardService(db=db_session, settings=settings).summary()["worker_status"]
+
+    assert status["status"] == "error"
+    assert status["recent_errors"][0]["job_name"] == "evaluate_signals"
+    assert status["recent_errors"][0]["error"] == "bad quantity"
+
+
+def test_dashboard_position_attribution_groups_position_economics(db_session, settings):
+    seed_perpetual_instrument(db_session)
+    service = ExecutionService(db=db_session, settings=settings, registry=StrategyRegistry())
+    service.submit_entry_order(
+        strategy_name="breakout",
+        strategy_instance_name="breakout@15m",
+        symbol="BTC/USDT",
+        reference_price=100.0,
+        instrument_type=InstrumentType.PERPETUAL,
+        margin_mode=MarginMode.ISOLATED,
+        leverage=2.0,
+        position_side=PositionSide.LONG,
+        quantity=0.2,
+    )
+    position = service.portfolio_service.get_open_positions()[0]
+    service.close_position(position, 105.0, "strategy_exit")
+
+    attribution = DashboardService(db=db_session, settings=settings).summary()["position_attribution"]
+
+    assert attribution[0]["position_id"] == position.id
+    assert attribution[0]["symbol"] == "BTC/USDT"
+    assert attribution[0]["status"] == "closed"
+    assert attribution[0]["entry_quantity"] == pytest.approx(0.2)
+    assert attribution[0]["quantity"] == pytest.approx(0.2)
+    assert attribution[0]["entry_notional"] > 0
+    assert attribution[0]["current_quantity"] == pytest.approx(0.0)
+    assert attribution[0]["total_fees"] > 0
+    assert attribution[0]["net_pnl"] == pytest.approx(attribution[0]["realized_pnl"])
 
 
 def test_perpetual_backtest_runs(db_session, settings, synthetic_market_data):

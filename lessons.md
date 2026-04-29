@@ -41,6 +41,7 @@
 - Dashboard operational views should prefer the current allowlist over raw historical rows. Otherwise stale state from previous experiments makes the system look noisier and less healthy than it really is.
 - Dust-sized residual positions can block the scheduler if broker precision rounds a float artifact below the lot size. Treat values that are within a tiny tolerance of an increment boundary as that increment, and add regression tests around close-position paths.
 - Partial-exit accounting must allocate entry fees against original entry quantity, not the current remaining position quantity. Otherwise the final close of a small remainder can be charged the full entry fee again and distort realized PnL.
+- Runtime health is multi-layered. API, database, websockets, scheduler jobs, and trade accounting can fail independently, so the dashboard should surface worker exceptions and position attribution next to stream status.
 
 ## Agent Misuse Risks
 
@@ -69,6 +70,7 @@
 - split breakout exits into side-specific `exit_long` and `exit_short` signals and added a minimum breakout-strength filter after the 15-minute paper run showed simultaneous entry/exit states and low-quality micro-breakouts
 - fixed lot-size rounding for dust remainders after the live ETH short hit take-profit but the worker could not close a `0.01`-lot residual due to floating-point drift
 - fixed partial-exit fee allocation after the ETH dust close showed the final remainder could overstate costs by allocating the whole original entry fee again
+- added persisted worker job status and position-level attribution to the dashboard so operator health reflects both infrastructure and the trading loop
 
 ## What We Would Do Differently In V2
 

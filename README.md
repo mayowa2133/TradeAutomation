@@ -179,6 +179,8 @@ Research and automation:
 - `POST /api/v1/llm/decisions`
 - `GET /api/v1/dashboard/summary`
 
+The dashboard summary includes portfolio/risk state, websocket stream health, persisted scheduler worker status, recent worker exceptions, and per-position attribution so the UI can distinguish a healthy API from a healthy trading loop.
+
 Websocket channels:
 
 - `GET /ws/events`
